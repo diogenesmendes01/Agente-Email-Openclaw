@@ -1,57 +1,89 @@
-# Agente-Email-Openclaw
+# Agente-Email-OpenClaw
 
-Sistema de automação de emails que recebe webhooks do Gmail via Pub/Sub, processa com LLM e envia mensagens formatadas no Telegram com botões de ação.
+Sistema de automação de emails que recebe webhooks do Gmail via Pub/Sub, processa com LLM e envia mensagens formatadas no Telegram com botões de ação (Arquivar, VIP, Spam).
 
 ## Arquitetura
 
 ```
-Gmail → Pub/Sub → Tailscale Funnel → Gog (8788) → Orchestrator (8787) → Telegram
+Gmail → Pub/Sub → Tailscale Funnel (HTTPS) → Gog (porta 8788) → Orchestrator (porta 8787) → Telegram
 ```
 
 ## Componentes
 
-### Orchestrator (`orchestrator/`)
-- `main.py` - FastAPI app que recebe webhooks e coordena o processamento
-- `handlers/email_processor.py` - Processa emails usando LLM
-- `services/` - Serviços de integração (Telegram, LLM, Notion, Qdrant, GOG)
+| Arquivo | Descrição |
+|---------|-----------|
+| `orchestrator/main.py` | FastAPI app que recebe webhooks e coordena o processamento |
+| `orchestrator/handlers/email_processor.py` | Processa emails usando LLM |
+| `orchestrator/services/telegram_service.py` | Envia mensagens formatadas no Telegram |
+| `orchestrator/services/llm_service.py` | Integração com LLM (OpenAI/GLM) |
+| `orchestrator/services/notion_service.py` | Integração com Notion |
+| `orchestrator/services/qdrant_service.py` | Vector store para busca |
+| `orchestrator/services/gog_service.py` | Integração com Gog CLI |
+| `telegram_poller.py` | Bot que fica em loop verificando callbacks (botões clicados) |
+| `vip_manager.py` | Gerencia lista VIP e ações |
 
-### Gog (`telegram_poller.py`)
-- Bot que fica em loop verificando callbacks do Telegram (botões clicados)
-- Gerencia ações pendentes e confirmações
+## Quick Start
 
-## Configuração
-
-### Variáveis de ambiente
+### 1. Instalar dependências
 ```bash
-TELEGRAM_BOT_TOKEN=       # Token do bot do Telegram
-TELEGRAM_BOT_TOKEN_FILE=   # Ou arquivo com o token
-OPENAI_API_KEY=           # Chave da OpenAI (opcional)
-NOTION_API_KEY=           # Chave do Notion (opcional)
-QDRANT_URL=              # URL do Qdrant (default: http://localhost:6333)
+pip install -r requirements.txt
 ```
 
-### Gmail Pub/Sub
+### 2. Configurar variáveis de ambiente
 ```bash
-# Setup do watch
-gog gmail watch start --account <email> --label INBOX --topic projects/<project>/topics/<topic>
+export TELEGRAM_BOT_TOKEN="seu_token_aqui"
+export OPENAI_API_KEY="sua_chave_aqui"
 ```
 
-### Execução
-
+### 3. Setup Gmail Pub/Sub
 ```bash
-# Orchestrator
+gog gmail watch start --account seu@email.com --label INBOX --topic projects/seu-projeto/topics/gmail-watch
+```
+
+### 4. Rodar os serviços
+```bash
+# Terminal 1: Gog (Pub/Sub listener)
+gog gmail watch serve --account seu@email.com --bind 127.0.0.1 --port 8788 \
+  --path /gmail-pubsub \
+  --hook-url "http://127.0.0.1:8787/hooks/gmail?token=seu_token" \
+  --token seu_gog_token
+
+# Terminal 2: Orchestrator
 cd orchestrator
-PYTHONPATH=/opt/email-agent python3 -m uvicorn orchestrator.main:app --host 127.0.0.1 --port 8787
+PYTHONPATH=/path/do/projeto python3 -m uvicorn orchestrator.main:app --host 127.0.0.1 --port 8787
 
-# Gog (Pub/Sub listener)
-gog gmail watch serve --account <email> --bind 127.0.0.1 --port 8788 --path /gmail-pubsub --hook-url http://127.0.0.1:8787/hooks/gmail
+# Terminal 3: Telegram Poller
+python3 telegram_poller.py
 ```
 
 ## Fluxo
 
-1. Email chega no Gmail
-2. Pub/Sub notifica via push (Tailscale Funnel)
-3. Gog recebe e forward pro Orchestrator
-4. Orchestrator processa email com LLM
-5. Envia mensagem formatada no Telegram com botões (Arquivar, VIP, Spam)
-6. Usuário clica botão → Telegram Poller processa ação
+1. **Email chega** no Gmail
+2. **Pub/Sub** notifica via push (Tailscale Funnel expõe URL pública)
+3. **Gog** recebe a notificação e forward pro Orchestrator
+4. **Orchestrator** processa email com LLM
+5. **Telegram** recebe mensagem formatada com botões (Arquivar, VIP, Spam)
+6. **Usuário clica botão** → Telegram Poller processa a ação
+
+## Configuração
+
+### Tailscale Funnel (expor webhook públicamente)
+```bash
+tailscale funnel --bg http://127.0.0.1:8788
+```
+
+### Gmail Watch Topic
+```bash
+gcloud pubsub topics create gmail-watch --project=seu-projeto
+gcloud pubsub subscriptions create gmail-watch-sub --topic=gmail-watch --push-endpoint=https://sua-url.ts.net/gmail-pubsub
+```
+
+## Config (config.json)
+
+```json
+{
+  "telegram_bot_token": "token_do_bot",
+  "gmail_account": "seu@email.com",
+  "gmail_topic": "projects/seu-projeto/topics/gmail-watch"
+}
+```
