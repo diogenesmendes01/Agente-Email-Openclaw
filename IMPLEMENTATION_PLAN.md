@@ -91,7 +91,7 @@
 ## API OpenRouter para LLM
 
 ```python
-OPENROUTER_API_KEY = "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"
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = "z-ai/glm-5-turbo"
 
 async def generate_custom_reply(email_content: str, instruction: str) -> str:

@@ -281,7 +281,7 @@ async def test_webhook(request: Request):
 def get_account_by_token(token: str) -> Optional[str]:
     """Identifica a conta pelo hook token"""
     tokens = {
-        "4cfa50bd0e2ef8105a300290cdd05902ada7af51194ceea4": "diogenes.mendes01@gmail.com",
+        os.getenv("GOG_HOOK_TOKEN", "4cfa50bd0e2ef8105a300290cdd05902ada7af51194ceea4"): "diogenes.mendes01@gmail.com",
         # Adicionar outros tokens conforme necessário
     }
     return tokens.get(token)
