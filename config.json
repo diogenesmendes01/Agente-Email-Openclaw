@@ -1,0 +1,38 @@
+{
+  "notion": {
+    "api_key_env": "NOTION_API_KEY",
+    "databases": {
+      "config": "33d2b64f-5143-811a-93c9-eb5bb474c102",
+      "projetos": "33d2b64f-5143-8107-8d89-da96277a6635",
+      "tarefas": "33d2b64f-5143-81b5-803d-d042dbb50525",
+      "decisoes": "33d2b64f-5143-8139-85d4-dfd46d674216"
+    },
+    "page_id": "33d2b64f-5143-816e-a7cc-fd06b4103aba"
+  },
+  "qdrant": {
+    "host": "localhost",
+    "port": 6333,
+    "collections": {
+      "emails": "emails",
+      "threads": "threads",
+      "profiles": "profiles"
+    }
+  },
+  "llm": {
+    "provider": "openrouter",
+    "model": "openrouter/z-ai/glm-5-turbo",
+    "embedding_model": "text-embedding-3-small"
+  },
+  "gmail": {
+    "accounts": {
+      "diogenes.mendes01@gmail.com": {
+        "telegram_topic": null,
+        "hook_token_env": "GOG_HOOK_TOKEN_PESSOAL"
+      }
+    }
+  },
+  "telegram": {
+    "bot_token_env": "TELEGRAM_BOT_TOKEN",
+    "chat_id": "-1003730685847"
+  }
+}
