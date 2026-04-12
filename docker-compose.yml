@@ -17,3 +17,49 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+  orchestrator:
+    build: .
+    container_name: email-agent-orchestrator
+    ports:
+      - "8787:8787"
+    env_file:
+      - .env
+    environment:
+      - EMAIL_AGENT_BASE_DIR=/app
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./vip-list.json:/app/vip-list.json
+      - ./blacklist.json:/app/blacklist.json
+      - ./feedback.json:/app/feedback.json
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8787/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    command: python -m uvicorn orchestrator.main:app --host 0.0.0.0 --port 8787
+
+  telegram-poller:
+    build: .
+    container_name: email-agent-telegram-poller
+    env_file:
+      - .env
+    environment:
+      - EMAIL_AGENT_BASE_DIR=/app
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./vip-list.json:/app/vip-list.json
+      - ./blacklist.json:/app/blacklist.json
+      - ./feedback.json:/app/feedback.json
+      - ./pending_actions.json:/app/pending_actions.json
+      - ./pending_replies.json:/app/pending_replies.json
+    depends_on:
+      - orchestrator
+    restart: unless-stopped
+    command: python telegram_poller.py
