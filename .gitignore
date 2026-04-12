@@ -9,3 +9,8 @@ logs/
 *.egg-info/
 dist/
 build/
+vip-list.json
+blacklist.json
+feedback.json
+pending_actions.json
+pending_replies.json

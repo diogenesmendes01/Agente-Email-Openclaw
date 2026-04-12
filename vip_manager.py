@@ -4,11 +4,14 @@ VIP/Blacklist Manager - Gerencia listas VIP e blacklist de remetentes
 
 import json
 import os
+from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List
 
-VIP_FILE = "/opt/email-agent/vip-list.json"
-BLACKLIST_FILE = "/opt/email-agent/blacklist.json"
+_BASE_DIR = Path(os.getenv("EMAIL_AGENT_BASE_DIR", Path(__file__).resolve().parent))
+
+VIP_FILE = str(_BASE_DIR / "vip-list.json")
+BLACKLIST_FILE = str(_BASE_DIR / "blacklist.json")
 
 
 def load_json(filepath: str) -> List[Dict]:

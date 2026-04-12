@@ -36,13 +36,16 @@ class TelegramService:
     
     def __init__(self):
         self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-        self.chat_id = os.getenv("TELEGRAM_CHAT_ID", "-1003730685847")
+        self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.api_base = f"https://api.telegram.org/bot{self.bot_token}"
         self._configured = bool(self.bot_token)
         
         if self._configured:
             logger.info("TelegramService configurado")
     
+    # Limite do Telegram para mensagens
+    MAX_MESSAGE_LENGTH = 4096
+
     async def send_email_notification(
         self,
         email: Dict[str, Any],
@@ -52,47 +55,85 @@ class TelegramService:
         topic_id: Optional[int] = 11,
         reasoning_tokens: int = 0
     ) -> Optional[int]:
-        """Envia notificação formatada"""
-        
+        """Envia notificação formatada. Mensagens longas são divididas."""
+
         if not self._configured:
             logger.warning("Telegram não configurado")
             return None
-        
+
         text = self._format_message(email, classification, summary, action, reasoning_tokens)
-        
+        reply_markup = self._create_keyboard(email, action)
+
+        # Se mensagem cabe no limite, enviar normalmente
+        if len(text) <= self.MAX_MESSAGE_LENGTH:
+            return await self._send_message(text, topic_id, reply_markup)
+
+        # Mensagem longa: dividir em partes, botões só na última
+        parts = self._split_message(text)
+        last_message_id = None
+        for i, part in enumerate(parts):
+            is_last = (i == len(parts) - 1)
+            markup = reply_markup if is_last else None
+            last_message_id = await self._send_message(part, topic_id, markup)
+
+        return last_message_id
+
+    async def _send_message(
+        self, text: str, topic_id: Optional[int] = None,
+        reply_markup: Optional[Dict] = None
+    ) -> Optional[int]:
+        """Envia uma mensagem individual ao Telegram"""
         payload = {
             "chat_id": self.chat_id,
             "text": text,
             "parse_mode": "HTML",
             "disable_web_page_preview": True
         }
-        
         if topic_id:
             payload["message_thread_id"] = topic_id
-        
-        # Botões inline
-        reply_markup = self._create_keyboard(email, action)
         if reply_markup:
             payload["reply_markup"] = reply_markup
-        
+
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
-                    f"{self.api_base}/sendMessage",
-                    json=payload
+                    f"{self.api_base}/sendMessage", json=payload
                 )
-                
                 if response.status_code == 200:
                     data = response.json()
-                    message_id = data.get("result", {}).get("message_id")
-                    logger.info(f"Notificação enviada: message_id={message_id}")
-                    return message_id
+                    msg_id = data.get("result", {}).get("message_id")
+                    logger.info(f"Notificação enviada: message_id={msg_id}")
+                    return msg_id
                 else:
                     logger.error(f"Erro Telegram: {response.status_code} - {response.text}")
                     return None
         except Exception as e:
             logger.error(f"Erro ao enviar: {e}")
             return None
+
+    def _split_message(self, text: str) -> list:
+        """Divide mensagem longa em partes respeitando o limite do Telegram.
+        Tenta quebrar em linhas vazias para não cortar no meio de um parágrafo."""
+        limit = self.MAX_MESSAGE_LENGTH - 20  # margem de segurança
+        if len(text) <= limit:
+            return [text]
+
+        parts = []
+        while len(text) > limit:
+            # Tentar quebrar em linha vazia antes do limite
+            split_at = text.rfind("\n\n", 0, limit)
+            if split_at == -1:
+                split_at = text.rfind("\n", 0, limit)
+            if split_at == -1:
+                split_at = limit
+
+            parts.append(text[:split_at])
+            text = text[split_at:].lstrip("\n")
+
+        if text:
+            parts.append(text)
+
+        return parts
     
     def _format_message(
         self,
