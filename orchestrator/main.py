@@ -7,34 +7,52 @@ import os
 import json
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Set
+from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-import sys
-sys.path.insert(0, "/opt/email-agent")
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from dotenv import load_dotenv
 
-# Carregar variáveis de ambiente
-load_dotenv('/opt/email-agent/.env')
+# Determinar diretório base do projeto (configurável via env)
+BASE_DIR = Path(os.getenv("EMAIL_AGENT_BASE_DIR", Path(__file__).resolve().parent.parent))
 
-# Configurar logging
+# Carregar variáveis de ambiente (tenta .env local primeiro, depois BASE_DIR)
+if Path(".env").exists():
+    load_dotenv(".env")
+elif (BASE_DIR / ".env").exists():
+    load_dotenv(BASE_DIR / ".env")
+
+# Configurar logging (stdout para docker/systemd, arquivo opcional)
+log_handlers = [logging.StreamHandler()]
+log_dir = BASE_DIR / "logs"
+if log_dir.exists() or os.getenv("EMAIL_AGENT_LOG_FILE"):
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_handlers.append(logging.FileHandler(log_dir / "email_agent.log"))
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('/opt/email-agent/logs/email_agent.log'),
-        logging.StreamHandler()
-    ]
+    handlers=log_handlers
 )
 logger = logging.getLogger(__name__)
 
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Email Agent", version="1.0.0")
+app.state.limiter = limiter
 
-# Adicionar path do projeto
-import sys
-sys.path.insert(0, '/opt/email-agent')
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(status_code=429, content={"detail": "Rate limit excedido. Tente novamente em breve."})
+
+# Cache de emails já processados (deduplicação)
+_processed_emails: Set[str] = set()
+MAX_PROCESSED_CACHE = 1000
 
 # Importar serviços
 from orchestrator.services.notion_service import NotionService
@@ -43,6 +61,8 @@ from orchestrator.services.llm_service import LLMService
 from orchestrator.services.gog_service import GOGService
 from orchestrator.services.telegram_service import TelegramService
 from orchestrator.handlers.email_processor import EmailProcessor
+from orchestrator.services.company_service import CompanyService
+from orchestrator.services.learning_engine import LearningEngine
 
 # Inicializar serviços
 notion = NotionService()
@@ -50,7 +70,9 @@ qdrant = QdrantService()
 llm = LLMService()
 gog = GOGService()
 telegram = TelegramService()
-processor = EmailProcessor(notion, qdrant, llm, gog, telegram)
+company = CompanyService()
+learning = LearningEngine(qdrant, telegram)
+processor = EmailProcessor(notion, qdrant, llm, gog, telegram, company, learning)
 
 
 class GmailWebhookPayload(BaseModel):
@@ -82,13 +104,14 @@ async def health_check():
 
 
 @app.post("/hooks/gmail")
+@limiter.limit("30/minute")
 async def gmail_webhook(
     request: Request,
     background_tasks: BackgroundTasks
 ):
     """
     Webhook para receber notificações de novo email do Gmail
-    
+
     O GOG gmail watch envia POST com:
     - message.data: base64 encoded pubsub message
     - token: hook token para identificar conta
@@ -96,31 +119,30 @@ async def gmail_webhook(
     try:
         body = await request.json()
         logger.info(f"Webhook recebido: {json.dumps(body)[:500]}")
-        
+
         # Validar token (pode vir do body ou query param)
         token = body.get("token")
         if not token:
-            # Tentar pegar da query string
-            from urllib.parse import urlencode, parse_qs
+            from urllib.parse import parse_qs
             query_params = parse_qs(request.url.query)
             token_list = query_params.get("token", [])
             if token_list:
                 token = token_list[0]
-        
+
         if not token:
             raise HTTPException(status_code=401, detail="Token não fornecido")
-        
+
         # Identificar conta pelo token
         account = get_account_by_token(token)
         if not account:
             raise HTTPException(status_code=401, detail="Token inválido")
-        
+
         # Extrair email_id ou history_id do payload
         message_data = body.get("message", {})
         pubsub_message = None
         email_id = None
         history_id = None
-        
+
         if "data" in message_data:
             import base64
             decoded = base64.urlsafe_b64decode(message_data["data"])
@@ -130,28 +152,25 @@ async def gmail_webhook(
         else:
             email_id = message_data.get("emailId") or body.get("emailId")
             history_id = message_data.get("historyId") or body.get("historyId")
-        
+
         if not email_id and not history_id:
             raise HTTPException(status_code=400, detail="Nenhum identificador encontrado (emailId ou historyId)")
-        
+
         logger.info(f"Processando - email_id: {email_id}, history_id: {history_id}, conta: {account}")
-        
+
         # Processar em background
         async def process_with_history():
-            # Primeiro, verificar se há messages no payload (gog forward)
+            import asyncio
+
             messages_from_payload = pubsub_message.get("messages", []) if pubsub_message else []
-            
+
             if messages_from_payload:
                 logger.info(f"Processando {len(messages_from_payload)} emails do payload direto")
                 for msg in messages_from_payload:
                     msg_id = msg.get("id")
-                    if msg_id:
-                        logger.info(f"Processando email do payload: {msg_id} - {msg.get('subject', 'sem subject')}")
+                    if msg_id and not _is_duplicate(msg_id):
                         await processor.process_email(msg_id, account)
             elif history_id:
-                # Buscar emails desde history_id usando gog
-                import asyncio
-                gog = GOGService()
                 result = await asyncio.create_subprocess_exec(
                     "gog", "gmail", "history", "--since", str(history_id),
                     "--account", account, "--json", "--select=id",
@@ -160,21 +179,19 @@ async def gmail_webhook(
                 )
                 stdout, stderr = await result.communicate()
                 if result.returncode == 0 and stdout:
-                    import json as json_mod
-                    history_data = json_mod.loads(stdout.decode("utf-8"))
+                    history_data = json.loads(stdout.decode("utf-8"))
                     for msg in history_data.get("messages", []):
                         msg_id = msg.get("id")
-                        if msg_id:
-                            logger.info(f"Processando email da history: {msg_id}")
-                            processor.process_email(msg_id, account)
+                        if msg_id and not _is_duplicate(msg_id):
+                            await processor.process_email(msg_id, account)
                 else:
                     logger.error(f"Erro history: {stderr.decode()}")
-            
-            if email_id:
-                processor.process_email(email_id, account)
-        
+
+            if email_id and not _is_duplicate(email_id):
+                await processor.process_email(email_id, account)
+
         background_tasks.add_task(process_with_history)
-        
+
         return JSONResponse(
             status_code=200,
             content={
@@ -184,7 +201,7 @@ async def gmail_webhook(
                 "timestamp": datetime.utcnow().isoformat()
             }
         )
-        
+
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="JSON inválido")
     except Exception as e:
@@ -193,32 +210,39 @@ async def gmail_webhook(
 
 
 @app.post("/telegram/callback")
+@limiter.limit("60/minute")
 async def telegram_callback(request: Request):
     """
-    Endpoint para processar callbacks dos botões inline do Telegram
+    Endpoint para processar callbacks dos botões inline do Telegram.
+    Validação via secret token header.
     """
+    # Validar secret token do Telegram
+    expected_secret = os.getenv("TELEGRAM_WEBHOOK_SECRET")
+    if expected_secret:
+        received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if received_secret != expected_secret:
+            raise HTTPException(status_code=403, detail="Secret token inválido")
+
     try:
         body = await request.json()
         logger.info(f"Callback recebido: {json.dumps(body)[:500]}")
-        
-        # Extrair callback data
+
         callback_query = body.get("callback_query")
         if not callback_query:
             return JSONResponse(status_code=200, content={"status": "ignored"})
-        
+
         callback_id = callback_query.get("id")
         callback_data = callback_query.get("data", "")
         message = callback_query.get("message", {})
         chat_id = message.get("chat", {}).get("id")
-        
-        # Parse da ação
+
         parts = callback_data.split(":")
         action_type = parts[0] if parts else "unknown"
         email_id = parts[1] if len(parts) > 1 else ""
-        
+        account = parts[2] if len(parts) > 2 else ""
+
         logger.info(f"Callback: {action_type} para email {email_id}")
-        
-        # Respostas por ação
+
         action_responses = {
             "archive": "🗑️ Email arquivado",
             "create_task": "📋 Task criada",
@@ -229,22 +253,25 @@ async def telegram_callback(request: Request):
             "send_draft": "✏️ Resposta enviada",
             "edit_draft": "📝 Editando rascunho..."
         }
-        
+
         response_text = action_responses.get(action_type, f"Ação: {action_type}")
-        
-        # Responder ao callback (remove loading)
+
         import httpx
         async with httpx.AsyncClient(timeout=10.0) as client:
             await client.post(
                 f"https://api.telegram.org/bot{telegram.bot_token}/answerCallbackQuery",
                 json={"callback_query_id": callback_id, "text": response_text}
             )
-            
-            # Atualizar mensagem
+
+            # Executar ação real
+            if action_type == "archive" and email_id and account:
+                await gog.archive_email(email_id, account)
+            elif action_type == "create_task" and email_id:
+                await notion.create_task({"titulo": f"Email: {email_id}", "prioridade": "Média"}, account)
+
             if chat_id and message.get("message_id"):
                 original_text = message.get("text", "")
                 new_text = f"{original_text}\n\n✅ {response_text}"
-                
                 await client.post(
                     f"https://api.telegram.org/bot{telegram.bot_token}/editMessageText",
                     json={
@@ -254,11 +281,9 @@ async def telegram_callback(request: Request):
                         "parse_mode": "HTML"
                     }
                 )
-        
-        # TODO: Executar ação real (archive, criar task, etc)
-        
+
         return JSONResponse(status_code=200, content={"status": "ok"})
-        
+
     except Exception as e:
         logger.error(f"Erro no callback: {e}", exc_info=True)
         return JSONResponse(status_code=200, content={"status": "error"})
@@ -268,23 +293,62 @@ async def telegram_callback(request: Request):
 async def test_webhook(request: Request):
     """Endpoint para testar o webhook manualmente"""
     body = await request.json()
-    email_id = body.get("emailId", "19d7c4a1e8b2f3d")
-    account = body.get("account", "diogenes.mendes01@gmail.com")
-    
+    email_id = body.get("emailId")
+    account = body.get("account")
+
+    if not email_id or not account:
+        raise HTTPException(status_code=400, detail="emailId e account são obrigatórios")
+
     logger.info(f"TESTE: Processando email {email_id}")
-    
     result = await processor.process_email(email_id, account)
-    
     return JSONResponse(content=result)
 
 
+def _is_duplicate(email_id: str) -> bool:
+    """Verifica se email já foi processado (deduplicação in-memory)"""
+    if email_id in _processed_emails:
+        logger.info(f"Email {email_id} já processado, pulando (dedup)")
+        return True
+    _processed_emails.add(email_id)
+    # Limpar cache se ficar muito grande
+    if len(_processed_emails) > MAX_PROCESSED_CACHE:
+        # Remove metade mais antiga (set não tem ordem, mas evita crescimento infinito)
+        to_remove = list(_processed_emails)[:MAX_PROCESSED_CACHE // 2]
+        for eid in to_remove:
+            _processed_emails.discard(eid)
+    return False
+
+
 def get_account_by_token(token: str) -> Optional[str]:
-    """Identifica a conta pelo hook token"""
-    tokens = {
-        os.getenv("GOG_HOOK_TOKEN", "4cfa50bd0e2ef8105a300290cdd05902ada7af51194ceea4"): "diogenes.mendes01@gmail.com",
-        # Adicionar outros tokens conforme necessário
-    }
-    return tokens.get(token)
+    """Identifica a conta pelo hook token via config.json"""
+    config_path = BASE_DIR / "config.json"
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+        for email_addr, acct_config in config.get("gmail", {}).get("accounts", {}).items():
+            env_var = acct_config.get("hook_token_env", "")
+            acct_token = os.getenv(env_var, "")
+            if acct_token and acct_token == token:
+                return email_addr
+    except Exception as e:
+        logger.error(f"Erro ao carregar config.json: {e}")
+
+    # Fallback: token direto de env var (sem hardcode)
+    fallback_token = os.getenv("GOG_HOOK_TOKEN")
+    fallback_account = os.getenv("GOG_HOOK_ACCOUNT")
+    if fallback_token and fallback_token == token and fallback_account:
+        return fallback_account
+
+    return None
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Salvar estado antes de desligar"""
+    logger.info("Encerrando Email Agent... salvando estado.")
+    # Limpar cache de deduplicação
+    _processed_emails.clear()
+    logger.info("Email Agent encerrado.")
 
 
 if __name__ == "__main__":
