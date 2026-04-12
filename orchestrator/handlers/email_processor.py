@@ -7,8 +7,6 @@ import json
 import logging
 from datetime import datetime
 from typing import Dict, Any, Optional
-import sys
-sys.path.insert(0, '/opt/email-agent')
 
 from orchestrator.services.notion_service import NotionService
 from orchestrator.services.qdrant_service import QdrantService
@@ -17,28 +15,37 @@ from orchestrator.services.gog_service import GOGService
 from orchestrator.services.telegram_service import TelegramService
 from orchestrator.utils.email_parser import EmailParser
 from orchestrator.utils.text_cleaner import TextCleaner
+from orchestrator.services.company_service import CompanyService
+from orchestrator.services.learning_engine import LearningEngine
 
 logger = logging.getLogger(__name__)
 
 
 class EmailProcessor:
     """Processador principal de emails"""
-    
+
     def __init__(
         self,
         notion: NotionService,
         qdrant: QdrantService,
         llm: LLMService,
         gog: GOGService,
-        telegram: TelegramService
+        telegram: TelegramService,
+        company: CompanyService = None,
+        learning: LearningEngine = None
     ):
         self.notion = notion
         self.qdrant = qdrant
         self.llm = llm
         self.gog = gog
         self.telegram = telegram
+        self.company = company
+        self.learning = learning
         self.parser = EmailParser()
         self.cleaner = TextCleaner()
+        self._learning_interval = int(os.getenv("LEARNING_INTERVAL", "50"))
+        self._emails_processed = 0
+        self._counter_loaded = False
     
     async def process_email(self, email_id: str, account: str) -> Dict[str, Any]:
         """
@@ -101,7 +108,7 @@ class EmailProcessor:
             
             # 3. Buscar contexto
             logger.info(f"[{email_id}] Buscando contexto...")
-            config = self.notion.get_account_config(account)
+            config = await self.notion.get_account_config(account)
             
             context = {
                 "vips": config.get("vips", []),
@@ -123,7 +130,52 @@ class EmailProcessor:
                     result["embedding"] = embedding
             else:
                 context["similar_emails"] = []
-            
+
+            # Fetch company profile (cached)
+            if self.company:
+                try:
+                    company_profile = await self.company.get_profile(account)
+                    context["company_profile"] = company_profile
+
+                    # Cross-reference sender with clients
+                    from_email = email.get("from_email", "") or email.get("from", "")
+                    if company_profile.get("clientes"):
+                        client = self.company.is_client_contact(from_email, company_profile["clientes"])
+                        if client:
+                            context["sender_profile_client"] = client
+
+                    # Domain rules from Notion
+                    if company_profile.get("domain_rules"):
+                        context["domain_rules"] = company_profile["domain_rules"]
+                        domain_match = self.company.match_domain_rule(from_email, company_profile["domain_rules"])
+                        if domain_match:
+                            context["domain_match"] = domain_match
+                except Exception as e:
+                    logger.warning(f"[{email_id}] Erro ao buscar company profile: {e}")
+
+            # Fetch sender profile from Qdrant
+            if self.qdrant.is_connected():
+                try:
+                    from_email = email.get("from_email", "") or email.get("from", "")
+                    sender_profile = await self.qdrant.get_sender_profile(from_email, account)
+                    # Enrich with client info
+                    if context.get("sender_profile_client"):
+                        client = context["sender_profile_client"]
+                        sender_profile["is_client"] = True
+                        sender_profile["client_name"] = client.get("nome", "")
+                        sender_profile["client_project"] = client.get("projeto", "")
+                    context["sender_profile"] = sender_profile
+                except Exception as e:
+                    logger.warning(f"[{email_id}] Erro ao buscar sender profile: {e}")
+
+            # Fetch learned rules from Qdrant
+            if self.qdrant.is_connected():
+                try:
+                    learned_rules = await self.qdrant.get_learned_rules(account)
+                    context["learned_rules"] = learned_rules
+                except Exception as e:
+                    logger.warning(f"[{email_id}] Erro ao buscar learned rules: {e}")
+
             # 4. Classificar
             logger.info(f"[{email_id}] Classificando...")
             classification = await self.llm.classify_email(email, context)
@@ -138,12 +190,12 @@ class EmailProcessor:
             
             # 5. Resumir
             logger.info(f"[{email_id}] Resumindo...")
-            summary = await self.llm.summarize_email(email, classification)
+            summary = await self.llm.summarize_email(email, classification, context)
             result["summary"] = summary
             
             # 6. Decidir ação
             logger.info(f"[{email_id}] Decidindo ação...")
-            action = await self.llm.decide_action(email, classification, summary, config)
+            action = await self.llm.decide_action(email, classification, summary, config, context)
             result["action"] = action
             
             # 7. Persistir decisão
@@ -160,7 +212,7 @@ class EmailProcessor:
                 "timestamp": result["timestamp"]
             }
             
-            notion_page_id = self.notion.log_decision(decision_data)
+            notion_page_id = await self.notion.log_decision(decision_data)
             result["notion_page_id"] = notion_page_id
             
             # Armazenar no Qdrant
@@ -196,6 +248,24 @@ class EmailProcessor:
             result["telegram_message_id"] = message_id
             result["reasoning_tokens"] = total_reasoning_tokens
             
+            # Lazy-load counter from Qdrant on first successful email
+            if not self._counter_loaded and self.qdrant.is_connected():
+                try:
+                    self._emails_processed = await self.qdrant.get_learning_counter(account) or 0
+                    self._counter_loaded = True
+                except Exception:
+                    pass
+
+            # Increment counter and trigger learning
+            self._emails_processed += 1
+            if self.learning and self._emails_processed % self._learning_interval == 0:
+                try:
+                    logger.info(f"[{email_id}] Disparando ciclo de aprendizado (#{self._emails_processed})")
+                    await self.learning.analyze_and_learn(account)
+                    await self.qdrant.update_learning_counter(account, self._emails_processed)
+                except Exception as e:
+                    logger.error(f"[{email_id}] Erro no learning engine: {e}")
+
             result["status"] = "success"
             logger.info(f"[{email_id}] Processamento concluído")
             
@@ -224,7 +294,7 @@ class EmailProcessor:
         elif acao == "criar_task":
             task = action.get("task", {})
             task["email_id"] = email_id
-            self.notion.create_task(task, account)
+            await self.notion.create_task(task, account)
             logger.info(f"Task criada para email {email_id}")
         
         elif acao == "rascunho":
