@@ -8,17 +8,35 @@ import os
 import asyncio
 import logging
 import json
+import signal
+import tempfile
 import httpx
-import subprocess
+from pathlib import Path
 from datetime import datetime
 import sys
 
-# Adicionar path para vip_manager
-sys.path.insert(0, '/opt/email-agent')
+from dotenv import load_dotenv
+
+# Determinar diretório base
+BASE_DIR = Path(os.getenv("EMAIL_AGENT_BASE_DIR", Path(__file__).resolve().parent))
+
+# Carregar .env
+if Path(".env").exists():
+    load_dotenv(".env")
+elif (BASE_DIR / ".env").exists():
+    load_dotenv(BASE_DIR / ".env")
+
+# Adicionar path para imports
+sys.path.insert(0, str(BASE_DIR))
 from vip_manager import (
     add_vip, is_vip, get_min_urgency, get_all_vips,
     add_to_blacklist, is_blacklisted, get_blacklist_reason
 )
+
+from orchestrator.services.qdrant_service import QdrantService
+
+# Initialize Qdrant for structured feedback
+_qdrant = QdrantService()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,48 +47,87 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# Carregar variáveis de ambiente do .env
-from dotenv import load_dotenv
-load_dotenv('/opt/email-agent/.env')
-
 # Configurações
 NOTION_API_KEY = os.getenv("NOTION_API_KEY", "")
-NOTION_DB_TAREFAS = "33d2b64f-5143-81b5-803d-d042dbb50525"
+NOTION_DB_TAREFAS = os.getenv("NOTION_DB_TAREFAS", "33d2b64f-5143-81b5-803d-d042dbb50525")
 
-# Armazena estado temporário (em produção usar Redis)
+# Estado temporário
 pending_actions = {}
-pending_custom_replies = {}  # Estado para responder custom
+pending_custom_replies = {}
 
-# Arquivos de estado
-FEEDBACK_FILE = "/opt/email-agent/feedback.json"
-PENDING_REPLIES_FILE = "/opt/email-agent/pending_replies.json"
-PENDING_ACTIONS_FILE = "/opt/email-agent/pending_actions.json"
+# Arquivos de estado (relativos ao BASE_DIR)
+FEEDBACK_FILE = str(BASE_DIR / "feedback.json")
+PENDING_REPLIES_FILE = str(BASE_DIR / "pending_replies.json")
+PENDING_ACTIONS_FILE = str(BASE_DIR / "pending_actions.json")
 
 # API OpenRouter para LLM
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
+def _atomic_write_json(filepath: str, data) -> bool:
+    """Escrita atômica em JSON - evita corrupção se o processo crashar"""
+    try:
+        dir_path = os.path.dirname(filepath) or "."
+        fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
+        try:
+            with os.fdopen(fd, 'w') as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, filepath)  # Atômico no mesmo filesystem
+            return True
+        except Exception:
+            os.unlink(tmp_path)
+            raise
+    except Exception as e:
+        logger.error(f"Erro ao salvar {filepath}: {e}")
+        return False
+
+
+def _load_json(filepath: str, default=None):
+    """Carrega JSON com fallback seguro"""
+    if default is None:
+        default = {}
+    try:
+        if os.path.exists(filepath):
+            with open(filepath, 'r') as f:
+                return json.load(f)
+    except (json.JSONDecodeError, Exception) as e:
+        logger.error(f"Erro ao carregar {filepath}: {e}")
+    return default
+
+
 def load_pending_actions():
     """Carrega pending_actions do arquivo"""
-    try:
-        if os.path.exists(PENDING_ACTIONS_FILE):
-            with open(PENDING_ACTIONS_FILE, 'r') as f:
-                return json.load(f)
-    except Exception as e:
-        logger.error(f"Erro ao carregar pending_actions: {e}")
-    return {}
+    return _load_json(PENDING_ACTIONS_FILE, {})
+
 
 def save_pending_actions():
-    """Salva pending_actions no arquivo"""
+    """Salva pending_actions no arquivo (atômico)"""
+    _atomic_write_json(PENDING_ACTIONS_FILE, pending_actions)
+
+
+async def run_gog(cmd_args: list, account: str, timeout: float = 30) -> tuple:
+    """Executa GOG de forma assíncrona. Retorna (success: bool, output: str)"""
+    env = os.environ.copy()
+    env["GOG_KEYRING_PASSWORD"] = os.getenv("GOG_KEYRING_PASSWORD", "")
+    env["GOG_ACCOUNT"] = account
     try:
-        with open(PENDING_ACTIONS_FILE, 'w') as f:
-            json.dump(pending_actions, f, indent=2)
+        proc = await asyncio.create_subprocess_exec(
+            "gog", *cmd_args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        if proc.returncode == 0:
+            return True, stdout.decode("utf-8", errors="replace")
+        else:
+            return False, stderr.decode("utf-8", errors="replace")
+    except asyncio.TimeoutError:
+        proc.kill()
+        return False, "Timeout"
     except Exception as e:
-        logger.error(f"Erro ao salvar pending_actions: {e}")
+        return False, str(e)
 
-# Arquivo de feedback
-FEEDBACK_FILE = "/opt/email-agent/feedback.json"
 
-# Mapeamento de urgência para emoji
 URGENCY_EMOJIS = {
     "critical": "🔴",
     "high": "🟠",
@@ -142,31 +199,30 @@ async def edit_message_text(client: httpx.AsyncClient, chat_id: int, message_id:
     except Exception as e:
         logger.error(f"Erro ao editar mensagem: {e}")
 
-def save_feedback(email_id: str, sender: str, original_urgency: str, corrected_urgency: str, keywords: list):
-    """Salva feedback de reclassificação em feedback.json"""
+async def save_feedback(email_id: str, sender: str, original_urgency: str, corrected_urgency: str, keywords: list):
+    """Salva feedback de reclassificação em feedback.json (backup) e Qdrant (primário)"""
     try:
-        feedback_data = []
-        
-        # Ler arquivo existente
-        if os.path.exists(FEEDBACK_FILE):
-            with open(FEEDBACK_FILE, 'r') as f:
-                feedback_data = json.load(f)
-        
-        # Adicionar novo registro
-        feedback_entry = {
+        # Backup: feedback.json
+        feedback_data = _load_json(FEEDBACK_FILE, [])
+        feedback_data.append({
             "email_id": email_id,
             "from": sender,
             "original_urgency": original_urgency,
             "corrected_urgency": corrected_urgency,
             "date": datetime.now().strftime("%Y-%m-%d"),
             "keywords": keywords
-        }
-        feedback_data.append(feedback_entry)
-        
-        # Salvar
-        with open(FEEDBACK_FILE, 'w') as f:
-            json.dump(feedback_data, f, indent=2)
-        
+        })
+        _atomic_write_json(FEEDBACK_FILE, feedback_data)
+
+        # Primary: Qdrant structured feedback
+        if _qdrant.is_connected():
+            await _qdrant.update_feedback(
+                email_id=email_id,
+                feedback="corrected",
+                original_priority=original_urgency,
+                corrected_priority=corrected_urgency,
+            )
+
         logger.info(f"Feedback salvo: {email_id[:15]} | {original_urgency} -> {corrected_urgency}")
     except Exception as e:
         logger.error(f"Erro ao salvar feedback: {e}")
@@ -222,41 +278,22 @@ async def generate_custom_reply(email_content: str, instruction: str) -> str:
         return None
 
 def save_pending_reply(email_id: str, data: dict):
-    """Salva estado de custom reply pendente"""
-    try:
-        pending = {}
-        if os.path.exists(PENDING_REPLIES_FILE):
-            with open(PENDING_REPLIES_FILE, 'r') as f:
-                pending = json.load(f)
-        pending[email_id] = data
-        with open(PENDING_REPLIES_FILE, 'w') as f:
-            json.dump(pending, f, indent=2)
-    except Exception as e:
-        logger.error(f"Erro ao salvar pending reply: {e}")
+    """Salva estado de custom reply pendente (atômico)"""
+    pending = _load_json(PENDING_REPLIES_FILE, {})
+    pending[email_id] = data
+    _atomic_write_json(PENDING_REPLIES_FILE, pending)
 
 def get_pending_reply(email_id: str) -> dict:
     """Recupera estado de custom reply pendente"""
-    try:
-        if os.path.exists(PENDING_REPLIES_FILE):
-            with open(PENDING_REPLIES_FILE, 'r') as f:
-                pending = json.load(f)
-                return pending.get(email_id, {})
-    except Exception as e:
-        logger.error(f"Erro ao ler pending reply: {e}")
-    return {}
+    pending = _load_json(PENDING_REPLIES_FILE, {})
+    return pending.get(email_id, {})
 
 def clear_pending_reply(email_id: str):
-    """Remove estado de custom reply pendente"""
-    try:
-        if os.path.exists(PENDING_REPLIES_FILE):
-            with open(PENDING_REPLIES_FILE, 'r') as f:
-                pending = json.load(f)
-            if email_id in pending:
-                del pending[email_id]
-                with open(PENDING_REPLIES_FILE, 'w') as f:
-                    json.dump(pending, f, indent=2)
-    except Exception as e:
-        logger.error(f"Erro ao limpar pending reply: {e}")
+    """Remove estado de custom reply pendente (atômico)"""
+    pending = _load_json(PENDING_REPLIES_FILE, {})
+    if email_id in pending:
+        del pending[email_id]
+        _atomic_write_json(PENDING_REPLIES_FILE, pending)
 
 async def action_custom_reply_start(email_id: str, message: dict, client: httpx.AsyncClient):
     """Inicia fluxo de resposta customizada"""
@@ -265,7 +302,7 @@ async def action_custom_reply_start(email_id: str, message: dict, client: httpx.
     
     # Extrair dados
     parts = message.get("data", "").split(":")
-    account = parts[2] if len(parts) > 2 else "diogenes.mendes01@gmail.com"
+    account = parts[2] if len(parts) > 2 else os.getenv("GOG_HOOK_ACCOUNT", "")
     sender = parts[3] if len(parts) > 3 else ""
     
     # Salvar estado
@@ -335,23 +372,16 @@ async def action_custom_reply_generate(email_id: str, instruction: str, client: 
 async def action_mark_read(email_id: str, account: str, client: httpx.AsyncClient, chat_id: int):
     """✅ Marcar como lido - Arquiva no Gmail"""
     try:
-        # Executar GOG para arquivar
-        env = os.environ.copy()
-        env["GOG_KEYRING_PASSWORD"] = ""
-        env["GOG_ACCOUNT"] = account
-        
-        result = subprocess.run(
-            ["/usr/local/bin/gog", "gmail", "modify", email_id, 
-             "--remove-labels", "INBOX", "UNREAD"],
-            capture_output=True, text=True, env=env, timeout=30
+        success, output = await run_gog(
+            ["gmail", "modify", email_id, "--remove-labels", "INBOX", "UNREAD"],
+            account, timeout=30
         )
-        
-        if result.returncode == 0:
-            await send_message(client, chat_id, 
+        if success:
+            await send_message(client, chat_id,
                 f"✅ <b>Email marcado como lido</b>\n📧 Arquivado no Gmail")
         else:
             await send_message(client, chat_id,
-                f"⚠️ Erro ao arquivar: {result.stderr[:100]}")
+                f"⚠️ Erro ao arquivar: {output[:100]}")
     except Exception as e:
         logger.error(f"Erro em mark_read: {e}")
         await send_message(client, chat_id, f"❌ Erro: {str(e)[:100]}")
@@ -417,23 +447,17 @@ async def action_archive(email_id: str, account: str, client: httpx.AsyncClient,
 async def action_spam(email_id: str, account: str, sender: str, client: httpx.AsyncClient, chat_id: int, message_id: int):
     """🚫 Marcar como spam"""
     try:
-        env = os.environ.copy()
-        env["GOG_KEYRING_PASSWORD"] = ""
-        env["GOG_ACCOUNT"] = account
-        
-        result = subprocess.run(
-            ["/usr/local/bin/gog", "gmail", "modify", email_id,
+        success, output = await run_gog(
+            ["gmail", "modify", email_id,
              "--remove-labels", "INBOX", "UNREAD",
              "--add-labels", "SPAM"],
-            capture_output=True, text=True, env=env, timeout=30
+            account, timeout=30
         )
-        
-        if result.returncode == 0:
-            # Adicionar sender na blacklist
+        if success:
             add_to_blacklist(sender, "marcado como spam pelo usuário")
             await mark_message_done(chat_id, message_id, "🚫 Marcado como spam", client, email_id)
         else:
-            await send_message(client, chat_id, f"⚠️ Erro: {result.stderr[:100]}")
+            await send_message(client, chat_id, f"⚠️ Erro: {output[:100]}")
     except Exception as e:
         logger.error(f"Erro em spam: {e}")
 
@@ -540,7 +564,7 @@ async def action_reclassify_complete(email_id: str, new_urgency: str, client: ht
     original_text = state["original_text"]
     
     # 1. Salvar feedback
-    save_feedback(email_id, sender, original_urgency, new_urgency, keywords)
+    await save_feedback(email_id, sender, original_urgency, new_urgency, keywords)
     
     # 2. Editar texto da mensagem - trocar header de urgência
     lines = original_text.split("\n")
@@ -650,25 +674,18 @@ async def action_send_draft(email_id: str, account: str, client: httpx.AsyncClie
             f"✉️ <b>Enviando resposta...</b>\n"
             f"📧 Para: {sender_email}\n"
             f"📝 Comprimento: {len(draft_content)} caracteres")
-        
-        env = os.environ.copy()
-        env["GOG_KEYRING_PASSWORD"] = ""
-        env["GOG_ACCOUNT"] = account
-        
-        # Usar gog gmail reply - precisamos do email_id original
-        result = subprocess.run(
-            ["/usr/local/bin/gog", "gmail", "reply", email_id,
-             "--body", draft_content],
-            capture_output=True, text=True, env=env, timeout=60
+
+        success, output = await run_gog(
+            ["gmail", "reply", email_id, "--body", draft_content],
+            account, timeout=60
         )
-        
-        if result.returncode == 0:
-            # Marcar como respondido e limpar estado
+
+        if success:
             await mark_message_done(chat_id, state.get("message_id"), "✅ Respondido", client, email_id)
             clear_pending_reply(email_id)
         else:
             await send_message(client, chat_id,
-                f"❌ <b>Erro ao enviar resposta:</b>\n{result.stderr[:200]}")
+                f"❌ <b>Erro ao enviar resposta:</b>\n{output[:200]}")
             
     except Exception as e:
         logger.error(f"Erro em send_draft: {e}")
@@ -774,8 +791,9 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
     callback_data = callback.get("data", "")
     message = callback.get("message", {})
     chat_id = message.get("chat", {}).get("id")
+    message_id = message.get("message_id")
     thread_id = message.get("message_thread_id", 11)
-    
+
     if not callback_data:
         return
     
@@ -784,7 +802,7 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
     parts = callback_data.split(":")
     action = parts[0] if parts else "unknown"
     email_id = parts[1] if len(parts) > 1 else ""
-    account = parts[2] if len(parts) > 2 else "diogenes.mendes01@gmail.com"
+    account = parts[2] if len(parts) > 2 else os.getenv("GOG_HOOK_ACCOUNT", "")
     
     # Extrair sender da mensagem original
     sender = ""
@@ -926,7 +944,9 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
     # CONFIRMAR SPAM
     if action == "confirm_spam":
         await answer_callback(client, callback_id, "🚫 Marcando como spam...")
-        await action_spam(email_id, account, sender, client, chat_id, state["message_id"])
+        state = pending_actions.get(email_id, {})
+        spam_msg_id = state.get("message_id", message_id)
+        await action_spam(email_id, account, sender, client, chat_id, spam_msg_id)
         return
     
     # CANCELAR SPAM
@@ -992,21 +1012,15 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
             
             # Enviar via Gmail usando gog gmail reply
             try:
-                env = os.environ.copy()
-                env["GOG_KEYRING_PASSWORD"] = ""
-                env["GOG_ACCOUNT"] = account
-                
-                result = subprocess.run(
-                    ["/usr/local/bin/gog", "gmail", "reply", original_email_id,
-                     "--body", last_reply],
-                    capture_output=True, text=True, env=env, timeout=60
+                success, output = await run_gog(
+                    ["gmail", "reply", original_email_id, "--body", last_reply],
+                    account, timeout=60
                 )
-                
-                if result.returncode == 0:
+                if success:
                     await mark_message_done(chat_id, message_id, "✅ Respondido", client, email_id)
                     clear_pending_reply(email_id)
                 else:
-                    await send_message(client, chat_id, f"❌ Erro ao enviar: {result.stderr[:100]}")
+                    await send_message(client, chat_id, f"❌ Erro ao enviar: {output[:100]}")
             except Exception as e:
                 logger.error(f"Erro ao enviar custom reply: {e}")
                 await send_message(client, chat_id, f"❌ Erro: {str(e)[:100]}")
@@ -1118,64 +1132,76 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
 # Carregar pending_actions ao iniciar
 pending_actions = load_pending_actions()
 
+# Flag de shutdown graceful
+_shutdown = False
+
+
+def _handle_shutdown(signum, frame):
+    global _shutdown
+    logger.info(f"Sinal {signum} recebido, encerrando gracefully...")
+    _shutdown = True
+
+
 async def main():
-    """Loop principal de polling"""
-    logger.info("🤖 Email Agent Bot iniciado com ações reais")
-    
+    """Loop principal de polling com graceful shutdown"""
+    global _shutdown
+
+    # Registrar handlers de sinal
+    signal.signal(signal.SIGTERM, _handle_shutdown)
+    signal.signal(signal.SIGINT, _handle_shutdown)
+
+    logger.info("Email Agent Bot iniciado com ações reais")
+
     offset = 0
-    
+
     async with httpx.AsyncClient(timeout=60.0) as client:
-        while True:
+        while not _shutdown:
             try:
                 updates = await get_updates(client, offset)
-                
+
                 for update in updates:
+                    if _shutdown:
+                        break
                     offset = update["update_id"] + 1
-                    
+
                     # Processar callback
                     if "callback_query" in update:
                         await process_callback(update["callback_query"], client)
-                    
+
                     # Processar mensagem normal (para responder custom)
                     elif "message" in update:
-                        message = update["message"]
-                        chat_id = message.get("chat", {}).get("id")
-                        text = message.get("text", "")
-                        
+                        msg = update["message"]
+                        msg_chat_id = msg.get("chat", {}).get("id")
+                        msg_text = msg.get("text", "")
+
                         # Verificar se há custom reply pendente
-                        if os.path.exists(PENDING_REPLIES_FILE):
-                            try:
-                                with open(PENDING_REPLIES_FILE, 'r') as f:
-                                    pending = json.load(f)
-                                
-                                # Encontrar reply pendente esperando instrução
-                                for email_id, state in pending.items():
-                                    if state.get("waiting_instruction") and state.get("chat_id") == chat_id:
-                                        # Gerar resposta com a instrução
-                                        await action_custom_reply_generate(email_id, text, client)
+                        pending = _load_json(PENDING_REPLIES_FILE, {})
+                        for eid, state in pending.items():
+                            if state.get("waiting_instruction") and state.get("chat_id") == msg_chat_id:
+                                await action_custom_reply_generate(eid, msg_text, client)
+                                break
+
+                            if state.get("waiting_task_details") and state.get("chat_id") == msg_chat_id:
+                                urgency = extract_urgency_from_message(state.get("original_text", ""))
+                                subject = ""
+                                for line in state.get("original_text", "").split("\n"):
+                                    if "📋" in line:
+                                        subject = line.replace("📋", "").strip()
                                         break
-                                    
-                                    # Verificar se está esperando detalhes da tarefa
-                                    if state.get("waiting_task_details") and state.get("chat_id") == chat_id:
-                                        # Criar tarefa com os detalhes
-                                        urgency = extract_urgency_from_message(state.get("original_text", ""))
-                                        subject = ""
-                                        for line in state.get("original_text", "").split("\n"):
-                                            if "📋" in line:
-                                                subject = line.replace("📋", "").strip()
-                                                break
-                                        
-                                        await action_create_task(email_id, subject, urgency, text, client, chat_id)
-                                        clear_pending_reply(email_id)
-                                        break
-                            except Exception as e:
-                                logger.error(f"Erro ao processar mensagem: {e}")
+                                await action_create_task(eid, subject, urgency, msg_text, client, msg_chat_id)
+                                clear_pending_reply(eid)
+                                break
 
                 await asyncio.sleep(1)
-                
+
             except Exception as e:
                 logger.error(f"Erro no loop: {e}")
                 await asyncio.sleep(5)
+
+    # Salvar estado antes de sair
+    save_pending_actions()
+    logger.info("Bot encerrado.")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
