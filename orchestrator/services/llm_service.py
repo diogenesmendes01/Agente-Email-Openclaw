@@ -199,7 +199,7 @@ class LLMService:
         # Try removing thread context
         if "EMAILS ANTERIORES DESTA THREAD:" in prompt:
             thread_start = prompt.index("EMAILS ANTERIORES DESTA THREAD:")
-            thread_end = prompt.find("EMAIL ATUAL:", thread_start)
+            thread_end = prompt.find("<<<EMAIL>>>", thread_start)
             if thread_end > thread_start:
                 prompt = prompt[:thread_start] + prompt[thread_end:]
 
