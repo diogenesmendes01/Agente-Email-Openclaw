@@ -1,5 +1,6 @@
 """PostgreSQL database service — replaces NotionService + vip_manager."""
 
+import json
 import logging
 from typing import Dict, Any, Optional, List
 
@@ -235,3 +236,60 @@ class DatabaseService:
                 "UPDATE accounts SET learning_counter = $1 WHERE id = $2",
                 count, account_id,
             )
+
+    # ── Pending Actions ──
+
+    async def create_pending_action(self, account_id, email_id, action_type, actor_id, chat_id, message_id, state=None):
+        """Create a pending action with 10-minute TTL."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO pending_actions (account_id, email_id, action_type, actor_id, chat_id, message_id, state)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7)
+                   RETURNING id""",
+                account_id, email_id, action_type, actor_id, chat_id, message_id,
+                json.dumps(state or {}),
+            )
+            return row["id"]
+
+    async def get_pending_action(self, email_id, action_type=None):
+        """Get pending action by email_id, optionally filtered by action_type."""
+        async with self._pool.acquire() as conn:
+            if action_type:
+                row = await conn.fetchrow(
+                    "SELECT * FROM pending_actions WHERE email_id = $1 AND action_type = $2 AND expires_at > NOW()",
+                    email_id, action_type,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT * FROM pending_actions WHERE email_id = $1 AND expires_at > NOW() ORDER BY created_at DESC",
+                    email_id,
+                )
+            return dict(row) if row else None
+
+    async def get_pending_by_chat(self, chat_id, action_type):
+        """Get pending action by chat_id and action_type (for text message matching)."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM pending_actions WHERE chat_id = $1 AND action_type = $2 AND expires_at > NOW() ORDER BY created_at DESC",
+                chat_id, action_type,
+            )
+            return dict(row) if row else None
+
+    async def update_pending_state(self, pending_id, state):
+        """Update the JSONB state of a pending action."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE pending_actions SET state = $1 WHERE id = $2",
+                json.dumps(state), pending_id,
+            )
+
+    async def delete_pending_action(self, pending_id):
+        """Delete a pending action (completed or cancelled)."""
+        async with self._pool.acquire() as conn:
+            await conn.execute("DELETE FROM pending_actions WHERE id = $1", pending_id)
+
+    async def cleanup_expired_actions(self):
+        """Delete expired pending actions. Returns count deleted."""
+        async with self._pool.acquire() as conn:
+            result = await conn.execute("DELETE FROM pending_actions WHERE expires_at < NOW()")
+            return int(result.split()[-1])

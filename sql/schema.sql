@@ -106,3 +106,21 @@ CREATE TABLE failed_jobs (
 );
 
 CREATE INDEX idx_failed_jobs_status ON failed_jobs(status, next_retry_at);
+
+-- Phase 3: Pending Actions (replaces pending_actions.json and pending_replies.json)
+
+CREATE TABLE pending_actions (
+    id SERIAL PRIMARY KEY,
+    account_id INT REFERENCES accounts(id),
+    email_id VARCHAR(100) NOT NULL,
+    action_type VARCHAR(50) NOT NULL,
+    actor_id BIGINT NOT NULL,
+    chat_id BIGINT,
+    message_id BIGINT,
+    state JSONB DEFAULT '{}',
+    expires_at TIMESTAMPTZ DEFAULT NOW() + INTERVAL '10 minutes',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_pending_email ON pending_actions(email_id);
+CREATE INDEX idx_pending_expires ON pending_actions(expires_at);
