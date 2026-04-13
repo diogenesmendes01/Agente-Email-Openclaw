@@ -35,8 +35,15 @@ async def activate_watch(account: str, topic: str):
 
     result = await gmail.watch(account, topic)
     if result:
-        print(f"Gmail Watch ativado para {account}")
-        print(f"  History ID: {result.get('historyId')}")
+        # Salvar historyId inicial para uso no webhook
+        initial_history_id = result.get('historyId')
+        if initial_history_id:
+            gmail.save_history_id(account, str(initial_history_id))
+            print(f"Gmail Watch ativado para {account}")
+            print(f"  History ID: {initial_history_id} (salvo para webhook)")
+        else:
+            print(f"Gmail Watch ativado para {account}")
+            print(f"  History ID: não retornado")
         print(f"  Expira em: {result.get('expiration')} (ms desde epoch)")
     else:
         print(f"ERRO: Falha ao ativar Gmail Watch para {account}")

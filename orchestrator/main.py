@@ -4,9 +4,10 @@ FastAPI app que recebe webhooks do Gmail e processa emails
 """
 
 import os
-import json
-import logging
 import re
+import json
+import hmac
+import logging
 from datetime import datetime
 from typing import Optional
 from collections import OrderedDict
@@ -251,7 +252,7 @@ async def telegram_callback(request: Request):
     Endpoint para processar callbacks dos botões inline do Telegram.
     Validação via secret token header.
     """
-    # Validar secret token do Telegram
+    # Validar secret token do Telegram (obrigatório)
     expected_secret = os.getenv("TELEGRAM_WEBHOOK_SECRET")
     if not expected_secret:
         raise HTTPException(status_code=503, detail="Telegram webhook secret não configurado")
@@ -290,13 +291,13 @@ async def telegram_callback(request: Request):
         account = parts[2] if len(parts) > 2 else ""
 
         if action_type not in ALLOWED_CALLBACK_ACTIONS:
-            raise HTTPException(status_code=400, detail="AÃ§Ã£o invÃ¡lida")
+            raise HTTPException(status_code=400, detail="Ação inválida")
 
         if action_type != "cancel":
             if not is_valid_email_id(email_id):
-                raise HTTPException(status_code=400, detail="emailId invÃ¡lido")
+                raise HTTPException(status_code=400, detail="emailId inválido")
             if not is_valid_account(account):
-                raise HTTPException(status_code=400, detail="Conta invÃ¡lida")
+                raise HTTPException(status_code=400, detail="Conta inválida")
 
         logger.info("Callback Telegram: action=%s email=%s", action_type, truncate_identifier(email_id))
 
@@ -371,9 +372,9 @@ async def test_webhook(request: Request):
         raise HTTPException(status_code=400, detail="emailId e account são obrigatórios")
 
     if not is_valid_email_id(email_id):
-        raise HTTPException(status_code=400, detail="emailId invÃ¡lido")
+        raise HTTPException(status_code=400, detail="emailId inválido")
     if not is_valid_account(account):
-        raise HTTPException(status_code=400, detail="account invÃ¡lido")
+        raise HTTPException(status_code=400, detail="account inválido")
 
     logger.info("TESTE: Processando email %s", truncate_identifier(email_id))
     result = await processor.process_email(email_id, account)

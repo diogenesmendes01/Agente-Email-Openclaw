@@ -11,16 +11,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar código da aplicação
+# Criar usuário não-root
+RUN useradd -m -r -s /bin/false appuser
+
+# Copiar código da aplicação (sem config.json — montado via volume)
 COPY orchestrator/ orchestrator/
 COPY telegram_poller.py .
 COPY vip_manager.py .
-COPY config.json .
 
 # Criar arquivos de estado se não existirem
 RUN echo '[]' > vip-list.json && echo '[]' > blacklist.json && echo '[]' > feedback.json && echo '{}' > pending_actions.json && echo '{}' > pending_replies.json
 
+# Ajustar permissões
+RUN chown -R appuser:appuser /app
+
 ENV PYTHONPATH=/app
 ENV EMAIL_AGENT_BASE_DIR=/app
+
+# Rodar como usuário não-root
+USER appuser
 
 EXPOSE 8787

@@ -4,6 +4,7 @@ __pycache__/
 *.log
 *.bak
 .env
+config.json
 qdrant/
 logs/
 *.egg-info/
