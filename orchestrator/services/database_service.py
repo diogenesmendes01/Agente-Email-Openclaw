@@ -293,3 +293,78 @@ class DatabaseService:
         async with self._pool.acquire() as conn:
             result = await conn.execute("DELETE FROM pending_actions WHERE expires_at < NOW()")
             return int(result.split()[-1])
+
+    # ── Company Profiles ──
+
+    async def get_company_profile(self, account_id):
+        """Get company profile by account_id."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM company_profiles WHERE account_id = $1", account_id
+            )
+            return dict(row) if row else None
+
+    async def upsert_company_profile(self, account_id, company_name, cnpj=None, tone=None, signature=None, whatsapp_url=None):
+        """Create or update company profile."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO company_profiles (account_id, company_name, cnpj, tone, signature, whatsapp_url)
+                   VALUES ($1, $2, $3, $4, $5, $6)
+                   ON CONFLICT (account_id) DO UPDATE SET
+                       company_name = EXCLUDED.company_name,
+                       cnpj = COALESCE(EXCLUDED.cnpj, company_profiles.cnpj),
+                       tone = COALESCE(EXCLUDED.tone, company_profiles.tone),
+                       signature = COALESCE(EXCLUDED.signature, company_profiles.signature),
+                       whatsapp_url = COALESCE(EXCLUDED.whatsapp_url, company_profiles.whatsapp_url),
+                       updated_at = NOW()
+                   RETURNING id""",
+                account_id, company_name, cnpj, tone, signature, whatsapp_url,
+            )
+            return row["id"]
+
+    # ── Playbooks ──
+
+    async def get_playbooks(self, company_id, active_only=True):
+        """Get playbooks for a company, ordered by priority desc."""
+        async with self._pool.acquire() as conn:
+            query = "SELECT * FROM playbooks WHERE company_id = $1"
+            if active_only:
+                query += " AND active = true"
+            query += " ORDER BY priority DESC"
+            rows = await conn.fetch(query, company_id)
+            return [dict(r) for r in rows]
+
+    async def create_playbook(self, company_id, trigger_description, response_template, auto_respond=True, priority=0):
+        """Create a new playbook."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO playbooks (company_id, trigger_description, response_template, auto_respond, priority)
+                   VALUES ($1, $2, $3, $4, $5) RETURNING id""",
+                company_id, trigger_description, response_template, auto_respond, priority,
+            )
+            return row["id"]
+
+    async def delete_playbook(self, playbook_id):
+        """Delete a playbook by id."""
+        async with self._pool.acquire() as conn:
+            await conn.execute("DELETE FROM playbooks WHERE id = $1", playbook_id)
+
+    # ── Domain Rules ──
+
+    async def get_domain_rules(self, company_id):
+        """Get domain rules for a company."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM domain_rules WHERE company_id = $1", company_id
+            )
+            return [dict(r) for r in rows]
+
+    # ── Account by Topic ──
+
+    async def get_account_by_topic(self, topic_id):
+        """Get account by Telegram topic ID."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM accounts WHERE telegram_topic_id = $1", topic_id
+            )
+            return dict(row) if row else None

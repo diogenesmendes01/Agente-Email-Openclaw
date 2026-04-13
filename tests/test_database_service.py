@@ -134,3 +134,41 @@ async def test_cleanup_expired_actions(mock_pool):
     db = DatabaseService(pool)
     count = await db.cleanup_expired_actions()
     assert count == 3
+
+@pytest.mark.asyncio
+async def test_upsert_company_profile(mock_pool):
+    pool, conn = mock_pool
+    conn.fetchrow.return_value = {"id": 1}
+    from orchestrator.services.database_service import DatabaseService
+    db = DatabaseService(pool)
+    result = await db.upsert_company_profile(1, "CodeWave", "12.345.678/0001-90", "formal")
+    assert result == 1
+
+@pytest.mark.asyncio
+async def test_get_company_profile(mock_pool):
+    pool, conn = mock_pool
+    conn.fetchrow.return_value = {"id": 1, "company_name": "CodeWave", "account_id": 1}
+    from orchestrator.services.database_service import DatabaseService
+    db = DatabaseService(pool)
+    result = await db.get_company_profile(1)
+    assert result["company_name"] == "CodeWave"
+
+@pytest.mark.asyncio
+async def test_get_playbooks(mock_pool):
+    pool, conn = mock_pool
+    conn.fetch.return_value = [
+        {"id": 1, "trigger_description": "boleto", "response_template": "Segue boleto..."},
+    ]
+    from orchestrator.services.database_service import DatabaseService
+    db = DatabaseService(pool)
+    result = await db.get_playbooks(1)
+    assert len(result) == 1
+
+@pytest.mark.asyncio
+async def test_create_playbook(mock_pool):
+    pool, conn = mock_pool
+    conn.fetchrow.return_value = {"id": 1}
+    from orchestrator.services.database_service import DatabaseService
+    db = DatabaseService(pool)
+    result = await db.create_playbook(1, "dúvida boleto", "Prezado, segue...")
+    assert result == 1
