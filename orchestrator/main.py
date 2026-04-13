@@ -4,7 +4,9 @@ FastAPI app que recebe webhooks do Gmail e processa emails
 """
 
 import os
+import re
 import json
+import hmac
 import logging
 from datetime import datetime
 from typing import Optional, Set
@@ -12,6 +14,7 @@ from collections import OrderedDict
 from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -45,6 +48,19 @@ logger = logging.getLogger(__name__)
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Email Agent", version="1.0.0")
 app.state.limiter = limiter
+
+
+# Security headers middleware
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 @app.exception_handler(RateLimitExceeded)
@@ -119,7 +135,7 @@ async def gmail_webhook(
     """
     try:
         body = await request.json()
-        logger.info(f"Webhook recebido: {json.dumps(body)[:500]}")
+        logger.info("Webhook recebido: payload com %d chaves", len(body))
 
         # Validar token (pode vir do body ou query param)
         token = body.get("token")
@@ -194,9 +210,11 @@ async def gmail_webhook(
 
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="JSON inválido")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Erro no webhook: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Erro interno no processamento")
 
 
 @app.post("/telegram/callback")
@@ -206,16 +224,19 @@ async def telegram_callback(request: Request):
     Endpoint para processar callbacks dos botões inline do Telegram.
     Validação via secret token header.
     """
-    # Validar secret token do Telegram
+    # Validar secret token do Telegram (obrigatório)
     expected_secret = os.getenv("TELEGRAM_WEBHOOK_SECRET")
-    if expected_secret:
-        received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if received_secret != expected_secret:
-            raise HTTPException(status_code=403, detail="Secret token inválido")
+    if not expected_secret:
+        logger.error("TELEGRAM_WEBHOOK_SECRET não configurado")
+        raise HTTPException(status_code=500, detail="Configuração de segurança ausente")
+
+    received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not hmac.compare_digest(received_secret, expected_secret):
+        raise HTTPException(status_code=403, detail="Secret token inválido")
 
     try:
         body = await request.json()
-        logger.info(f"Callback recebido: {json.dumps(body)[:500]}")
+        logger.info("Callback recebido de %s", get_remote_address(request))
 
         callback_query = body.get("callback_query")
         if not callback_query:
@@ -231,7 +252,27 @@ async def telegram_callback(request: Request):
         email_id = parts[1] if len(parts) > 1 else ""
         account = parts[2] if len(parts) > 2 else ""
 
-        logger.info(f"Callback: {action_type} para email {email_id}")
+        # Validar action_type contra whitelist
+        VALID_ACTIONS = {
+            "archive", "create_task", "schedule", "read", "keep", "cancel",
+            "send_draft", "edit_draft", "vip", "silence", "spam",
+            "custom_reply", "reclassify"
+        }
+        if action_type not in VALID_ACTIONS:
+            logger.warning(f"Action type inválido: {action_type}")
+            return JSONResponse(status_code=200, content={"status": "invalid_action"})
+
+        # Validar formato do email_id (alfanumérico)
+        if email_id and not re.match(r'^[a-zA-Z0-9_-]+$', email_id):
+            logger.warning(f"email_id com formato inválido")
+            return JSONResponse(status_code=200, content={"status": "invalid_email_id"})
+
+        # Validar formato do account (email)
+        if account and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', account):
+            logger.warning(f"account com formato inválido")
+            return JSONResponse(status_code=200, content={"status": "invalid_account"})
+
+        logger.info(f"Callback: {action_type} para email {email_id[:8]}...")
 
         action_responses = {
             "archive": "🗑️ Email arquivado",
@@ -280,6 +321,7 @@ async def telegram_callback(request: Request):
 
 
 @app.post("/hooks/gmail/test")
+@limiter.limit("5/minute")
 async def test_webhook(request: Request):
     """Endpoint para testar o webhook manualmente"""
     body = await request.json()
@@ -289,7 +331,13 @@ async def test_webhook(request: Request):
     if not email_id or not account:
         raise HTTPException(status_code=400, detail="emailId e account são obrigatórios")
 
-    logger.info(f"TESTE: Processando email {email_id}")
+    # Validar formatos
+    if not re.match(r'^[a-zA-Z0-9_-]+$', email_id):
+        raise HTTPException(status_code=400, detail="emailId com formato inválido")
+    if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', account):
+        raise HTTPException(status_code=400, detail="account com formato inválido")
+
+    logger.info(f"TESTE: Processando email {email_id[:8]}...")
     result = await processor.process_email(email_id, account)
     return JSONResponse(content=result)
 
@@ -316,7 +364,7 @@ def get_account_by_token(token: str) -> Optional[str]:
         for email_addr, acct_config in config.get("gmail", {}).get("accounts", {}).items():
             env_var = acct_config.get("hook_token_env", "")
             acct_token = os.getenv(env_var, "")
-            if acct_token and acct_token == token:
+            if acct_token and hmac.compare_digest(acct_token, token):
                 return email_addr
     except Exception as e:
         logger.error(f"Erro ao carregar config.json: {e}")
@@ -324,7 +372,7 @@ def get_account_by_token(token: str) -> Optional[str]:
     # Fallback: token direto de env var (sem hardcode)
     fallback_token = os.getenv("GOG_HOOK_TOKEN")
     fallback_account = os.getenv("GOG_HOOK_ACCOUNT")
-    if fallback_token and fallback_token == token and fallback_account:
+    if fallback_token and hmac.compare_digest(fallback_token, token) and fallback_account:
         return fallback_account
 
     return None

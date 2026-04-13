@@ -25,7 +25,7 @@
   },
   "gmail": {
     "accounts": {
-      "diogenes.mendes01@gmail.com": {
+      "seu@email.com": {
         "telegram_topic": null,
         "hook_token_env": "GOG_HOOK_TOKEN_PESSOAL"
       }
