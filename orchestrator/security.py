@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 from typing import Optional, Set, Tuple
+
+
+EMAIL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+ACCOUNT_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def constant_time_equals(expected: str, provided: str) -> bool:
@@ -90,3 +95,26 @@ def extract_bearer_token(authorization_header: Optional[str]) -> str:
     if scheme.lower() != "bearer":
         return ""
     return token.strip()
+
+
+def is_valid_email_id(value: Optional[str]) -> bool:
+    """Validate provider identifiers before passing them to downstream services."""
+    if not value:
+        return False
+    return bool(EMAIL_ID_RE.fullmatch(value))
+
+
+def is_valid_account(value: Optional[str]) -> bool:
+    """Validate email account identifiers."""
+    if not value:
+        return False
+    return bool(ACCOUNT_RE.fullmatch(value))
+
+
+def truncate_identifier(value: Optional[str], visible: int = 8) -> str:
+    """Shorten identifiers before logging them."""
+    if not value:
+        return ""
+    if len(value) <= visible:
+        return value
+    return f"{value[:visible]}..."
