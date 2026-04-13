@@ -14,11 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiar código da aplicação
 COPY orchestrator/ orchestrator/
 COPY telegram_poller.py .
-COPY vip_manager.py .
-COPY config.json .
-
-# Criar arquivos de estado se não existirem
-RUN echo '[]' > vip-list.json && echo '[]' > blacklist.json && echo '[]' > feedback.json && echo '{}' > pending_actions.json && echo '{}' > pending_replies.json
+COPY sql/ sql/
 
 ENV PYTHONPATH=/app
 ENV EMAIL_AGENT_BASE_DIR=/app

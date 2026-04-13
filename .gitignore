@@ -15,3 +15,6 @@ feedback.json
 pending_actions.json
 pending_replies.json
 credentials/
+pgdata/
+playbooks/
+history_ids.json
