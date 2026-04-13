@@ -68,6 +68,7 @@ from orchestrator.services.metrics_service import MetricsService
 from orchestrator.services.alert_service import AlertService
 from orchestrator.services.job_queue import JobQueue
 from orchestrator.handlers.telegram_callbacks import handle_callback, handle_text_message
+from orchestrator.services.playbook_service import PlaybookService
 
 # Serviços que não precisam de init async ficam no nível de módulo
 qdrant = QdrantService()
@@ -109,8 +110,9 @@ async def lifespan(app_instance):
     )
     job_queue = JobQueue(pool, max_attempts=_settings.job_max_attempts)
 
+    playbook_service = PlaybookService(db, llm)
     learning = LearningEngine(qdrant, telegram)
-    processor = EmailProcessor(db, qdrant, llm, gmail, telegram, learning, pdf_reader, metrics, job_queue)
+    processor = EmailProcessor(db, qdrant, llm, gmail, telegram, learning, pdf_reader, metrics, job_queue, playbook_service=playbook_service)
 
     # Background workers
     import asyncio

@@ -35,6 +35,7 @@ class EmailProcessor:
         pdf_reader: PdfReader = None,
         metrics=None,
         job_queue=None,
+        playbook_service=None,
     ):
         self.db = db
         self.qdrant = qdrant
@@ -45,6 +46,7 @@ class EmailProcessor:
         self.pdf_reader = pdf_reader
         self.metrics = metrics
         self.job_queue = job_queue
+        self.playbook_service = playbook_service
         self.parser = EmailParser()
         self.cleaner = TextCleaner()
         self._learning_interval = int(os.getenv("LEARNING_INTERVAL", "50"))
@@ -126,6 +128,10 @@ class EmailProcessor:
             # 3. Buscar contexto
             logger.info(f"[{email_id}] Buscando contexto...")
             config = await self.db.get_account_config(account)
+
+            # Fetch account_id early (needed for playbook check and later DB ops)
+            account_data = await self.db.get_account(account)
+            account_id = account_data["id"] if account_data else None
             
             context = {
                 "vips": config.get("vips", []),
@@ -176,7 +182,37 @@ class EmailProcessor:
                 result["status"] = "skipped"
                 result["reason"] = "Email não importante"
                 return result
-            
+
+            # 4.5. Check playbooks (if configured)
+            if self.playbook_service and account_id:
+                try:
+                    playbook_match = await self.playbook_service.match(
+                        account_id=account_id,
+                        email_body=email.get("body_clean", ""),
+                        email_subject=email.get("subject", ""),
+                    )
+                    if playbook_match and playbook_match.get("auto_respond"):
+                        # Generate and send auto-response
+                        from_name = email.get("from_name", "") or email.get("from", "")
+                        contact_name = from_name.split("<")[0].strip().strip('"') if "<" in from_name else from_name
+                        response_text = await self.playbook_service.generate_response(
+                            template=playbook_match["template"],
+                            company=playbook_match["company"],
+                            contact_name=contact_name,
+                            email_body=email.get("body_clean", ""),
+                        )
+                        if response_text:
+                            to_email = email.get("from_email", "") or email.get("from", "")
+                            await self.gmail.send_reply(
+                                email_id, response_text, account,
+                                to=to_email,
+                            )
+                            result["playbook_matched"] = True
+                            result["playbook_id"] = playbook_match["playbook_id"]
+                            logger.info(f"[{email_id}] Auto-responded via playbook #{playbook_match['playbook_id']}")
+                except Exception as e:
+                    logger.warning(f"[{email_id}] Playbook check error: {e}")
+
             # 5. Resumir
             logger.info(f"[{email_id}] Resumindo...")
             summary = await self.llm.summarize_email(email, classification, context)
@@ -201,9 +237,7 @@ class EmailProcessor:
                 "timestamp": result["timestamp"]
             }
             
-            # Get account_id for DB operations
-            account_data = await self.db.get_account(account)
-            account_id = account_data["id"] if account_data else None
+            # account_data and account_id already fetched above
             if account_id:
                 decision_data["account_id"] = account_id
             decision_id = await self.db.log_decision(decision_data)
