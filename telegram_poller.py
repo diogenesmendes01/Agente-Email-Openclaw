@@ -36,6 +36,7 @@ from vip_manager import (
 
 from orchestrator.services.qdrant_service import QdrantService
 from orchestrator.services.gmail_service import GmailService
+from orchestrator.security import is_telegram_actor_allowed
 
 # Initialize Qdrant for structured feedback
 _qdrant = QdrantService()
@@ -65,6 +66,13 @@ PENDING_ACTIONS_FILE = str(BASE_DIR / "pending_actions.json")
 
 # API OpenRouter para LLM
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+
+
+def _state_owned_by_actor(state: dict, actor_id: int) -> bool:
+    """Require follow-up actions to come from the same authorized Telegram user."""
+    if not state:
+        return False
+    return state.get("actor_id") == actor_id
 
 def _atomic_write_json(filepath: str, data) -> bool:
     """Escrita atômica em JSON - evita corrupção se o processo crashar"""
@@ -289,16 +297,18 @@ def clear_pending_reply(email_id: str):
         del pending[email_id]
         _atomic_write_json(PENDING_REPLIES_FILE, pending)
 
-async def action_custom_reply_start(email_id: str, message: dict, client: httpx.AsyncClient):
+async def action_custom_reply_start(
+    email_id: str,
+    message: dict,
+    client: httpx.AsyncClient,
+    account: str,
+    sender: str,
+    actor_id: int,
+):
     """Inicia fluxo de resposta customizada"""
     chat_id = message.get("chat", {}).get("id")
     text = message.get("text", "")
-    
-    # Extrair dados
-    parts = message.get("data", "").split(":")
-    account = parts[2] if len(parts) > 2 else os.getenv("GOG_HOOK_ACCOUNT", "")
-    sender = parts[3] if len(parts) > 3 else ""
-    
+
     # Salvar estado
     save_pending_reply(email_id, {
         "chat_id": chat_id,
@@ -306,6 +316,7 @@ async def action_custom_reply_start(email_id: str, message: dict, client: httpx.
         "email_id": email_id,
         "account": account,
         "sender": sender,
+        "actor_id": actor_id,
         "original_text": text,
         "waiting_instruction": True
     })
@@ -492,7 +503,13 @@ async def action_create_task(email_id: str, subject: str, urgency: str, task_det
         logger.error(f"Erro em create_task: {e}")
         await send_message(client, chat_id, f"❌ Erro: {str(e)[:100]}")
 
-async def action_reclassify_start(email_id: str, original_message: dict, client: httpx.AsyncClient, account: str = ""):
+async def action_reclassify_start(
+    email_id: str,
+    original_message: dict,
+    client: httpx.AsyncClient,
+    account: str = "",
+    actor_id: int = 0,
+):
     """🔄 Troca os botões para mostrar opções de urgência"""
     chat_id = original_message.get("chat", {}).get("id")
     message_id = original_message.get("message_id")
@@ -511,6 +528,7 @@ async def action_reclassify_start(email_id: str, original_message: dict, client:
         "message_id": message_id,
         "sender": sender,
         "account": account,
+        "actor_id": actor_id,
         "original_text": text,
         "original_urgency": extract_urgency_from_message(text),
         "keywords": extract_keywords_from_message(text)
@@ -647,7 +665,8 @@ async def show_confirmation_buttons(
     email_id: str,
     account: str,
     sender: str,
-    original_text: str
+    original_text: str,
+    actor_id: int,
 ):
     """Mostra botões de confirmação — edita a mensagem original (nunca envia nova)"""
 
@@ -658,6 +677,7 @@ async def show_confirmation_buttons(
         "action": action,
         "account": account,
         "sender": sender,
+        "actor_id": actor_id,
         "original_text": original_text
     }
     save_pending_actions()
@@ -743,8 +763,20 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
     chat_id = message.get("chat", {}).get("id")
     message_id = message.get("message_id")
     thread_id = message.get("message_thread_id", 11)
+    actor_id = callback.get("from", {}).get("id")
 
     if not callback_data:
+        return
+
+    is_allowed, reason = is_telegram_actor_allowed(actor_id, chat_id)
+    if not is_allowed:
+        logger.warning(
+            "Callback bloqueado (reason=%s actor_id=%s chat_id=%s)",
+            reason,
+            actor_id,
+            chat_id,
+        )
+        await answer_callback(client, callback_id, "Usuário não autorizado")
         return
     
     # Parse do callback: action:email_id:account
@@ -786,6 +818,10 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
     if action == "set_urgency":
         new_urgency = parts[1] if len(parts) > 1 else "medium"
         email_id_for_urgency = parts[2] if len(parts) > 2 else ""
+        state = pending_actions.get(email_id_for_urgency, {})
+        if not _state_owned_by_actor(state, actor_id):
+            await answer_callback(client, callback_id, "Ação não pertence a este usuário")
+            return
         
         logger.info(f"Set urgency: {new_urgency} for email {email_id_for_urgency[:15]}")
         logger.info(f"Pending actions keys: {list(pending_actions.keys())[:3]}")
@@ -796,6 +832,10 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
     
     # Callback: cancel_custom_reply - cancela resposta customizada
     if action == "cancel_custom_reply":
+        state = get_pending_reply(email_id)
+        if not _state_owned_by_actor(state, actor_id):
+            await answer_callback(client, callback_id, "Ação não pertence a este usuário")
+            return
         await answer_callback(client, callback_id, "❌ Cancelado")
         # Limpar estado
         clear_pending_reply(email_id)
@@ -814,9 +854,12 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
     
     # Callback: cancel_reclassify - volta botões originais
     if action == "cancel_reclassify":
+        state = pending_actions.get(email_id, {})
+        if not _state_owned_by_actor(state, actor_id):
+            await answer_callback(client, callback_id, "Ação não pertence a este usuário")
+            return
         await answer_callback(client, callback_id, "❌ Cancelado")
         if email_id in pending_actions:
-            state = pending_actions[email_id]
             reclassify_account = state.get("account", account)
             keyboard = _build_original_keyboard(email_id, reclassify_account)
             try:
@@ -842,8 +885,11 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
 
     # --- CONFIRMAR ARCHIVE ---
     if action == "confirm_archive":
-        await answer_callback(client, callback_id, "✅ Arquivando...")
         state = pending_actions.get(email_id, {})
+        if not _state_owned_by_actor(state, actor_id):
+            await answer_callback(client, callback_id, "Ação não pertence a este usuário")
+            return
+        await answer_callback(client, callback_id, "✅ Arquivando...")
         confirm_account = state.get("account", account)
         success = await action_archive_exec(email_id, confirm_account)
         status = "✅ Arquivado" if success else "❌ Erro ao arquivar"
@@ -852,9 +898,12 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
 
     # --- CANCELAR ARCHIVE ---
     if action == "cancel_archive":
+        state = pending_actions.get(email_id, {})
+        if not _state_owned_by_actor(state, actor_id):
+            await answer_callback(client, callback_id, "Ação não pertence a este usuário")
+            return
         await answer_callback(client, callback_id, "Cancelado")
         if email_id in pending_actions:
-            state = pending_actions[email_id]
             cancel_account = state.get("account", account)
             await edit_message_text(
                 client, chat_id, message_id,
@@ -867,8 +916,11 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
 
     # --- CONFIRMAR VIP ---
     if action == "confirm_vip":
-        await answer_callback(client, callback_id, "⭐ Adicionando VIP...")
         state = pending_actions.get(email_id, {})
+        if not _state_owned_by_actor(state, actor_id):
+            await answer_callback(client, callback_id, "Ação não pertence a este usuário")
+            return
+        await answer_callback(client, callback_id, "⭐ Adicionando VIP...")
         confirm_account = state.get("account", account)
         confirm_sender = state.get("sender", sender)
         success = await action_vip_exec(confirm_sender, confirm_account)
@@ -878,9 +930,12 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
 
     # --- CANCELAR VIP ---
     if action == "cancel_vip":
+        state = pending_actions.get(email_id, {})
+        if not _state_owned_by_actor(state, actor_id):
+            await answer_callback(client, callback_id, "Ação não pertence a este usuário")
+            return
         await answer_callback(client, callback_id, "Cancelado")
         if email_id in pending_actions:
-            state = pending_actions[email_id]
             cancel_account = state.get("account", account)
             await edit_message_text(
                 client, chat_id, message_id,
@@ -893,8 +948,11 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
 
     # --- CONFIRMAR SILENCE ---
     if action == "confirm_silence":
-        await answer_callback(client, callback_id, "🔇 Silenciando...")
         state = pending_actions.get(email_id, {})
+        if not _state_owned_by_actor(state, actor_id):
+            await answer_callback(client, callback_id, "Ação não pertence a este usuário")
+            return
+        await answer_callback(client, callback_id, "🔇 Silenciando...")
         confirm_account = state.get("account", account)
         confirm_sender = state.get("sender", sender)
         success = await action_silence_exec(confirm_sender, confirm_account)
@@ -904,9 +962,12 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
 
     # --- CANCELAR SILENCE ---
     if action == "cancel_silence":
+        state = pending_actions.get(email_id, {})
+        if not _state_owned_by_actor(state, actor_id):
+            await answer_callback(client, callback_id, "Ação não pertence a este usuário")
+            return
         await answer_callback(client, callback_id, "Cancelado")
         if email_id in pending_actions:
-            state = pending_actions[email_id]
             cancel_account = state.get("account", account)
             await edit_message_text(
                 client, chat_id, message_id,
@@ -919,8 +980,11 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
 
     # --- CONFIRMAR SPAM ---
     if action == "confirm_spam":
-        await answer_callback(client, callback_id, "🚫 Marcando como spam...")
         state = pending_actions.get(email_id, {})
+        if not _state_owned_by_actor(state, actor_id):
+            await answer_callback(client, callback_id, "Ação não pertence a este usuário")
+            return
+        await answer_callback(client, callback_id, "🚫 Marcando como spam...")
         confirm_account = state.get("account", account)
         confirm_sender = state.get("sender", sender)
         success = await action_spam_exec(email_id, confirm_account, confirm_sender)
@@ -930,9 +994,12 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
 
     # --- CANCELAR SPAM ---
     if action == "cancel_spam":
+        state = pending_actions.get(email_id, {})
+        if not _state_owned_by_actor(state, actor_id):
+            await answer_callback(client, callback_id, "Ação não pertence a este usuário")
+            return
         await answer_callback(client, callback_id, "Cancelado")
         if email_id in pending_actions:
-            state = pending_actions[email_id]
             cancel_account = state.get("account", account)
             await edit_message_text(
                 client, chat_id, message_id,
@@ -945,8 +1012,11 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
 
     # --- CONFIRMAR ENVIO DE RASCUNHO ---
     if action == "confirm_send_draft":
-        await answer_callback(client, callback_id, "✉️ Enviando resposta...")
         state = pending_actions.get(email_id, {})
+        if not _state_owned_by_actor(state, actor_id):
+            await answer_callback(client, callback_id, "Ação não pertence a este usuário")
+            return
+        await answer_callback(client, callback_id, "✉️ Enviando resposta...")
         confirm_account = state.get("account", account)
         success = await action_send_draft_exec(email_id, confirm_account)
         status = "✉️ Resposta Enviada" if success else "❌ Erro ao enviar rascunho"
@@ -955,9 +1025,12 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
 
     # --- CANCELAR ENVIO DE RASCUNHO ---
     if action == "cancel_send_draft":
+        state = pending_actions.get(email_id, {})
+        if not _state_owned_by_actor(state, actor_id):
+            await answer_callback(client, callback_id, "Ação não pertence a este usuário")
+            return
         await answer_callback(client, callback_id, "Cancelado")
         if email_id in pending_actions:
-            state = pending_actions[email_id]
             cancel_account = state.get("account", account)
             await edit_message_text(
                 client, chat_id, message_id,
@@ -975,12 +1048,15 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
     # Iniciar fluxo de resposta custom
     if action == "custom_reply":
         await answer_callback(client, callback_id, "💬 Aguardando instrução")
-        await action_custom_reply_start(email_id, message, client)
+        await action_custom_reply_start(email_id, message, client, account, sender, actor_id)
         return
     
     # Enviar rascunho customizado
     if action == "send_custom_draft":
         state = get_pending_reply(email_id)
+        if not _state_owned_by_actor(state, actor_id):
+            await answer_callback(client, callback_id, "Ação não pertence a este usuário")
+            return
         if state and "last_reply" in state:
             await answer_callback(client, callback_id, "✉️ Enviando...")
             
@@ -1011,6 +1087,9 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
     # Ajustar rascunho
     if action == "adjust_custom_draft":
         state = get_pending_reply(email_id)
+        if not _state_owned_by_actor(state, actor_id):
+            await answer_callback(client, callback_id, "Ação não pertence a este usuário")
+            return
         if state:
             state["waiting_instruction"] = True
             save_pending_reply(email_id, state)
@@ -1028,7 +1107,7 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
         await answer_callback(client, callback_id, "⚠️ Confirme a ação")
         await show_confirmation_buttons(
             client, chat_id, message_id,
-            "archive", email_id, account, sender, text
+            "archive", email_id, account, sender, text, actor_id
         )
         return
 
@@ -1037,7 +1116,7 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
         await answer_callback(client, callback_id, "⚠️ Confirme a ação")
         await show_confirmation_buttons(
             client, chat_id, message_id,
-            "vip", email_id, account, sender, text
+            "vip", email_id, account, sender, text, actor_id
         )
         return
 
@@ -1046,7 +1125,7 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
         await answer_callback(client, callback_id, "⚠️ Confirme a ação")
         await show_confirmation_buttons(
             client, chat_id, message_id,
-            "silence", email_id, account, sender, text
+            "silence", email_id, account, sender, text, actor_id
         )
         return
 
@@ -1055,7 +1134,7 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
         await answer_callback(client, callback_id, "⚠️ Confirme a ação")
         await show_confirmation_buttons(
             client, chat_id, message_id,
-            "spam", email_id, account, sender, text
+            "spam", email_id, account, sender, text, actor_id
         )
         return
 
@@ -1064,14 +1143,14 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
         await answer_callback(client, callback_id, "⚠️ Confirme a ação")
         await show_confirmation_buttons(
             client, chat_id, message_id,
-            "send_draft", email_id, account, sender, text
+            "send_draft", email_id, account, sender, text, actor_id
         )
         return
 
     # RECLASSIFY - trocar botões para urgências (sem mensagem nova)
     if action == "reclassify":
         await answer_callback(client, callback_id, "🔄 Selecione a urgência")
-        await action_reclassify_start(email_id, message, client, account=account)
+        await action_reclassify_start(email_id, message, client, account=account, actor_id=actor_id)
         return
 
     # ========================================================================
@@ -1088,6 +1167,7 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
             "email_id": email_id,
             "account": account,
             "sender": sender,
+            "actor_id": actor_id,
             "original_text": text,
             "waiting_task_details": True
         })
@@ -1167,15 +1247,34 @@ async def main():
                         msg = update["message"]
                         msg_chat_id = msg.get("chat", {}).get("id")
                         msg_text = msg.get("text", "")
+                        msg_actor_id = msg.get("from", {}).get("id")
+
+                        is_allowed, reason = is_telegram_actor_allowed(msg_actor_id, msg_chat_id)
+                        if not is_allowed:
+                            logger.warning(
+                                "Mensagem bloqueada (reason=%s actor_id=%s chat_id=%s)",
+                                reason,
+                                msg_actor_id,
+                                msg_chat_id,
+                            )
+                            continue
 
                         # Verificar se há custom reply pendente
                         pending = _load_json(PENDING_REPLIES_FILE, {})
                         for eid, state in pending.items():
-                            if state.get("waiting_instruction") and state.get("chat_id") == msg_chat_id:
+                            if (
+                                state.get("waiting_instruction")
+                                and state.get("chat_id") == msg_chat_id
+                                and state.get("actor_id") == msg_actor_id
+                            ):
                                 await action_custom_reply_generate(eid, msg_text, client)
                                 break
 
-                            if state.get("waiting_task_details") and state.get("chat_id") == msg_chat_id:
+                            if (
+                                state.get("waiting_task_details")
+                                and state.get("chat_id") == msg_chat_id
+                                and state.get("actor_id") == msg_actor_id
+                            ):
                                 urgency = extract_urgency_from_message(state.get("original_text", ""))
                                 subject = ""
                                 for line in state.get("original_text", "").split("\n"):
