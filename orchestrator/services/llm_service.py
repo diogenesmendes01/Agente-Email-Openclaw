@@ -454,9 +454,9 @@ Responda em JSON:
             json_end = response.rfind("}") + 1
             if json_start != -1 and json_end > json_start:
                 return json.loads(response[json_start:json_end])
-        except:
-            pass
-        
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"Erro ao parsear classificação: {e}")
+
         return self._default_classification()
     
     def _parse_summary(self, response: str) -> Dict[str, Any]:
@@ -466,9 +466,9 @@ Responda em JSON:
             json_end = response.rfind("}") + 1
             if json_start != -1 and json_end > json_start:
                 return json.loads(response[json_start:json_end])
-        except:
-            pass
-        
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"Erro ao parsear resumo: {e}")
+
         return {"resumo": response[:200], "entidades": {}, "sentimento": "neutro"}
     
     def _parse_action(self, response: str) -> Dict[str, Any]:
@@ -478,9 +478,9 @@ Responda em JSON:
             json_end = response.rfind("}") + 1
             if json_start != -1 and json_end > json_start:
                 return json.loads(response[json_start:json_end])
-        except:
-            pass
-        
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"Erro ao parsear ação: {e}")
+
         return {"acao": "notificar", "justificativa": "Falha ao processar"}
     
     def _default_classification(self) -> Dict[str, Any]:

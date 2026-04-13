@@ -24,11 +24,19 @@ def load_json(filepath: str) -> List[Dict]:
 
 
 def save_json(filepath: str, data: List[Dict]) -> bool:
-    """Salva lista em arquivo JSON"""
+    """Salva lista em arquivo JSON (escrita atômica)"""
     try:
-        with open(filepath, 'w') as f:
-            json.dump(data, f, indent=2)
-        return True
+        import tempfile
+        dir_path = os.path.dirname(filepath) or "."
+        fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
+        try:
+            with os.fdopen(fd, 'w') as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, filepath)
+            return True
+        except Exception:
+            os.unlink(tmp_path)
+            raise
     except Exception as e:
         print(f"Erro ao salvar {filepath}: {e}")
         return False

@@ -8,6 +8,7 @@ import json
 import logging
 from datetime import datetime
 from typing import Optional, Set
+from collections import OrderedDict
 from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -50,8 +51,8 @@ app.state.limiter = limiter
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
     return JSONResponse(status_code=429, content={"detail": "Rate limit excedido. Tente novamente em breve."})
 
-# Cache de emails já processados (deduplicação)
-_processed_emails: Set[str] = set()
+# Cache de emails já processados (deduplicação LRU)
+_processed_emails: OrderedDict = OrderedDict()
 MAX_PROCESSED_CACHE = 1000
 
 # Importar serviços
@@ -305,17 +306,15 @@ async def test_webhook(request: Request):
 
 
 def _is_duplicate(email_id: str) -> bool:
-    """Verifica se email já foi processado (deduplicação in-memory)"""
+    """Verifica se email já foi processado (deduplicação LRU in-memory)"""
     if email_id in _processed_emails:
+        _processed_emails.move_to_end(email_id)
         logger.info(f"Email {email_id} já processado, pulando (dedup)")
         return True
-    _processed_emails.add(email_id)
-    # Limpar cache se ficar muito grande
-    if len(_processed_emails) > MAX_PROCESSED_CACHE:
-        # Remove metade mais antiga (set não tem ordem, mas evita crescimento infinito)
-        to_remove = list(_processed_emails)[:MAX_PROCESSED_CACHE // 2]
-        for eid in to_remove:
-            _processed_emails.discard(eid)
+    _processed_emails[email_id] = True
+    # Evictar os mais antigos quando exceder o limite
+    while len(_processed_emails) > MAX_PROCESSED_CACHE:
+        _processed_emails.popitem(last=False)
     return False
 
 
