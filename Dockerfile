@@ -13,7 +13,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copiar código da aplicação
 COPY orchestrator/ orchestrator/
-COPY telegram_poller.py .
 COPY sql/ sql/
 
 ENV PYTHONPATH=/app
