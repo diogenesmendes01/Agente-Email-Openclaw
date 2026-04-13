@@ -42,9 +42,13 @@ async def test_playbook_match_auto_respond(processor):
     }
     processor.playbook_service.generate_response.return_value = "Prezado Client, segue segunda via do boleto."
 
+    processor.telegram.send_email_notification.return_value = 100
+    processor.db.log_decision.return_value = 1
+
     result = await processor.process_email("em1", "u@t.com")
     assert result["status"] == "success"
     assert result.get("playbook_matched") is True
+    assert result.get("playbook_id") == 1
     # Should have sent reply via Gmail
     processor.gmail.send_reply.assert_called_once()
 

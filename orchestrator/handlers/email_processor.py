@@ -192,6 +192,8 @@ class EmailProcessor:
                         email_subject=email.get("subject", ""),
                     )
                     if playbook_match and playbook_match.get("auto_respond"):
+                        result["playbook_matched"] = True
+                        result["playbook_id"] = playbook_match["playbook_id"]
                         # Generate and send auto-response
                         from_name = email.get("from_name", "") or email.get("from", "")
                         contact_name = from_name.split("<")[0].strip().strip('"') if "<" in from_name else from_name
@@ -207,8 +209,6 @@ class EmailProcessor:
                                 email_id, response_text, account,
                                 to=to_email,
                             )
-                            result["playbook_matched"] = True
-                            result["playbook_id"] = playbook_match["playbook_id"]
                             logger.info(f"[{email_id}] Auto-responded via playbook #{playbook_match['playbook_id']}")
                 except Exception as e:
                     logger.warning(f"[{email_id}] Playbook check error: {e}")
