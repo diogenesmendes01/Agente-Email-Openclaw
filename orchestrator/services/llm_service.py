@@ -483,6 +483,28 @@ Responda em JSON:
 
         return {"acao": "notificar", "justificativa": "Falha ao processar"}
     
+    async def generate_custom_reply(self, email_content: str, instruction: str) -> str:
+        """Generate a custom email reply using LLM."""
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {self.openrouter_key}"},
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": "Escreva respostas de email profissionais em português. Seja direto e formal."},
+                            {"role": "user", "content": f"Email recebido:\n{email_content[:2000]}\n\nInstrução: {instruction}\n\nEscreva a resposta:"},
+                        ],
+                        "max_tokens": 800,
+                    },
+                )
+                data = response.json()
+                return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.error(f"Custom reply generation error: {e}")
+            return None
+
     def _default_classification(self) -> Dict[str, Any]:
         """Classificação padrão"""
         return {
