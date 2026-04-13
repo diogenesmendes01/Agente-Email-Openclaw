@@ -237,6 +237,7 @@ OPENAI_API_KEY=sk-xxxxx                     # Passo 4
 # Telegram
 TELEGRAM_BOT_TOKEN=123456:ABC-DEF...       # Passo 2
 TELEGRAM_CHAT_ID=-100xxxxxxxxxx            # Passo 2
+TELEGRAM_ALLOWED_USER_IDS=123456789        # IDs dos usuarios autorizados no grupo
 TELEGRAM_WEBHOOK_SECRET=qualquer_string    # gere um valor aleatorio
 
 # Notion
@@ -248,10 +249,13 @@ NOTION_DB_DECISOES=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx    # Passo 3
 # Gmail
 GOG_HOOK_TOKEN_PESSOAL=seu_token_hex       # Passo 6
 GOG_HOOK_ACCOUNT=seu@email.com             # sua conta Gmail
+EMAIL_AGENT_TEST_WEBHOOK_TOKEN=outro_token # opcional; habilita /hooks/gmail/test
 
 # Qdrant (nao altere se estiver usando Docker Compose)
 QDRANT_HOST=localhost
 QDRANT_PORT=6333
+# QDRANT_API_KEY=xxxxx                     # opcional
+# QDRANT_HTTPS=false                       # opcional
 ```
 
 ### Passo 8: Configurar config.json
@@ -313,6 +317,9 @@ Isso inicia 3 servicos:
 - **qdrant** — Vector database (porta 6333, limite 1GB RAM)
 - **orchestrator** — FastAPI webhook server (porta 8787, limite 512MB RAM)
 - **telegram-poller** — Bot de long-polling (limite 256MB RAM)
+
+Por padrao, `qdrant` e `orchestrator` ficam publicados apenas em `127.0.0.1`.
+Se voce for expor o webhook externamente, faca isso por reverse proxy/Tailscale e mantenha essas portas fechadas para a internet.
 
 Verifique se esta tudo rodando:
 ```bash
@@ -395,9 +402,12 @@ O Tailscale Funnel expoe uma porta local como HTTPS publico (necessario para o P
 3. **Teste manual via API:**
    ```bash
    curl -X POST http://localhost:8787/hooks/gmail/test \
+     -H "Authorization: Bearer $EMAIL_AGENT_TEST_WEBHOOK_TOKEN" \
      -H "Content-Type: application/json" \
      -d '{"emailId":"SEU_EMAIL_ID","account":"seu@email.com"}'
    ```
+
+   O endpoint `/hooks/gmail/test` fica desabilitado se `EMAIL_AGENT_TEST_WEBHOOK_TOKEN` nao estiver definido.
 
 ---
 

@@ -7,7 +7,7 @@ import os
 import json
 import logging
 from datetime import datetime
-from typing import Optional, Set
+from typing import Optional
 from collections import OrderedDict
 from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
@@ -64,6 +64,11 @@ from orchestrator.services.telegram_service import TelegramService
 from orchestrator.handlers.email_processor import EmailProcessor
 from orchestrator.services.company_service import CompanyService
 from orchestrator.services.learning_engine import LearningEngine
+from orchestrator.security import (
+    constant_time_equals,
+    extract_bearer_token,
+    is_telegram_actor_allowed,
+)
 
 # Inicializar serviços
 notion = NotionService()
@@ -119,7 +124,7 @@ async def gmail_webhook(
     """
     try:
         body = await request.json()
-        logger.info(f"Webhook recebido: {json.dumps(body)[:500]}")
+        logger.info("Webhook Gmail recebido (keys=%s)", sorted(body.keys()))
 
         # Validar token (pode vir do body ou query param)
         token = body.get("token")
@@ -208,14 +213,16 @@ async def telegram_callback(request: Request):
     """
     # Validar secret token do Telegram
     expected_secret = os.getenv("TELEGRAM_WEBHOOK_SECRET")
-    if expected_secret:
-        received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if received_secret != expected_secret:
-            raise HTTPException(status_code=403, detail="Secret token inválido")
+    if not expected_secret:
+        raise HTTPException(status_code=503, detail="Telegram webhook secret não configurado")
+
+    received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not constant_time_equals(expected_secret, received_secret):
+        raise HTTPException(status_code=403, detail="Secret token inválido")
 
     try:
         body = await request.json()
-        logger.info(f"Callback recebido: {json.dumps(body)[:500]}")
+        logger.info("Callback Telegram recebido (keys=%s)", sorted(body.keys()))
 
         callback_query = body.get("callback_query")
         if not callback_query:
@@ -225,6 +232,17 @@ async def telegram_callback(request: Request):
         callback_data = callback_query.get("data", "")
         message = callback_query.get("message", {})
         chat_id = message.get("chat", {}).get("id")
+        actor_id = callback_query.get("from", {}).get("id")
+
+        is_allowed, reason = is_telegram_actor_allowed(actor_id, chat_id)
+        if not is_allowed:
+            logger.warning(
+                "Callback Telegram bloqueado (reason=%s actor_id=%s chat_id=%s)",
+                reason,
+                actor_id,
+                chat_id,
+            )
+            raise HTTPException(status_code=403, detail="Usuário do Telegram não autorizado")
 
         parts = callback_data.split(":")
         action_type = parts[0] if parts else "unknown"
@@ -282,6 +300,17 @@ async def telegram_callback(request: Request):
 @app.post("/hooks/gmail/test")
 async def test_webhook(request: Request):
     """Endpoint para testar o webhook manualmente"""
+    expected_token = os.getenv("EMAIL_AGENT_TEST_WEBHOOK_TOKEN", "").strip()
+    if not expected_token:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    provided_token = (
+        request.headers.get("X-Test-Webhook-Token", "").strip()
+        or extract_bearer_token(request.headers.get("Authorization"))
+    )
+    if not constant_time_equals(expected_token, provided_token):
+        raise HTTPException(status_code=403, detail="Token de teste inválido")
+
     body = await request.json()
     email_id = body.get("emailId")
     account = body.get("account")
@@ -316,7 +345,7 @@ def get_account_by_token(token: str) -> Optional[str]:
         for email_addr, acct_config in config.get("gmail", {}).get("accounts", {}).items():
             env_var = acct_config.get("hook_token_env", "")
             acct_token = os.getenv(env_var, "")
-            if acct_token and acct_token == token:
+            if constant_time_equals(acct_token, token):
                 return email_addr
     except Exception as e:
         logger.error(f"Erro ao carregar config.json: {e}")
@@ -324,7 +353,7 @@ def get_account_by_token(token: str) -> Optional[str]:
     # Fallback: token direto de env var (sem hardcode)
     fallback_token = os.getenv("GOG_HOOK_TOKEN")
     fallback_account = os.getenv("GOG_HOOK_ACCOUNT")
-    if fallback_token and fallback_token == token and fallback_account:
+    if constant_time_equals(fallback_token, token) and fallback_account:
         return fallback_account
 
     return None

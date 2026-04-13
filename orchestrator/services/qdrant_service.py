@@ -24,11 +24,18 @@ class QdrantService:
     def __init__(self):
         self.host = os.getenv("QDRANT_HOST", "localhost")
         self.port = int(os.getenv("QDRANT_PORT", "6333"))
+        self.api_key = os.getenv("QDRANT_API_KEY", "").strip() or None
+        self.https = os.getenv("QDRANT_HTTPS", "false").strip().lower() in {"1", "true", "yes"}
         self.client = None
         self._connected = False
         
         try:
-            self.client = QdrantClient(host=self.host, port=self.port)
+            self.client = QdrantClient(
+                host=self.host,
+                port=self.port,
+                api_key=self.api_key,
+                https=self.https,
+            )
             self._connected = True
             self._ensure_collections()
             logger.info(f"QdrantService conectado em {self.host}:{self.port}")
