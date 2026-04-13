@@ -360,42 +360,104 @@ async def action_custom_reply_generate(email_id: str, instruction: str, client: 
         reply_markup=keyboard)
 
 # ============================================================
-# AÇÕES REAIS
+# KEYBOARD HELPER
 # ============================================================
 
-async def action_mark_read(email_id: str, account: str, client: httpx.AsyncClient, chat_id: int):
-    """✅ Marcar como lido - Arquiva no Gmail"""
+def _build_original_keyboard(email_id: str, account: str) -> dict:
+    """Constrói o teclado original com todos os botões (reutilizável)"""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✉️ Enviar rascunho", "callback_data": f"send_draft:{email_id}:{account}"},
+                {"text": "📝 Criar tarefa", "callback_data": f"create_task:{email_id}:{account}"}
+            ],
+            [
+                {"text": "✅ Arquivar", "callback_data": f"archive:{email_id}:{account}"},
+                {"text": "⭐ Marcar VIP", "callback_data": f"vip:{email_id}:{account}"}
+            ],
+            [
+                {"text": "💬 Responder custom", "callback_data": f"custom_reply:{email_id}:{account}"},
+                {"text": "🔄 Reclassificar", "callback_data": f"reclassify:{email_id}:{account}"}
+            ],
+            [
+                {"text": "🔇 Silenciar", "callback_data": f"silence:{email_id}:{account}"},
+                {"text": "🗑️ Spam", "callback_data": f"spam:{email_id}:{account}"}
+            ],
+            [
+                {"text": "🔗 Abrir no Gmail", "url": f"https://mail.google.com/mail/u/0/#inbox/{email_id}"}
+            ]
+        ]
+    }
+
+# ============================================================
+# AÇÕES REAIS (retornam bool, NÃO enviam mensagens)
+# ============================================================
+
+async def action_archive_exec(email_id: str, account: str) -> bool:
+    """Arquiva email no Gmail. Retorna True se sucesso."""
     try:
-        success = await _gmail.archive_email(email_id, account)
-        if success:
-            await send_message(client, chat_id,
-                f"✅ <b>Email marcado como lido</b>\n📧 Arquivado no Gmail")
-        else:
-            await send_message(client, chat_id,
-                f"⚠️ Erro ao arquivar email")
+        return await _gmail.archive_email(email_id, account)
     except Exception as e:
-        logger.error(f"Erro em mark_read: {e}")
-        await send_message(client, chat_id, f"❌ Erro: {str(e)[:100]}")
+        logger.error(f"Erro em archive: {e}")
+        return False
+
+async def action_vip_exec(sender: str, account: str) -> bool:
+    """Adiciona remetente como VIP. Retorna True se adicionado, False se já era."""
+    try:
+        return add_vip(sender, sender.split('@')[0] if '@' in sender else sender, account=account)
+    except Exception as e:
+        logger.error(f"Erro em vip: {e}")
+        return False
+
+async def action_silence_exec(sender: str, account: str) -> bool:
+    """Adiciona remetente à blacklist. Retorna True se adicionado."""
+    try:
+        return add_to_blacklist(sender, "silenciado pelo usuário", account=account)
+    except Exception as e:
+        logger.error(f"Erro em silence: {e}")
+        return False
+
+async def action_spam_exec(email_id: str, account: str, sender: str) -> bool:
+    """Marca como spam no Gmail + adiciona à blacklist. Retorna True se sucesso."""
+    try:
+        success = await _gmail.mark_as_spam(email_id, account)
+        if success:
+            add_to_blacklist(sender, "marcado como spam pelo usuário", account=account)
+        return success
+    except Exception as e:
+        logger.error(f"Erro em spam: {e}")
+        return False
+
+async def action_send_draft_exec(email_id: str, account: str) -> bool:
+    """Envia rascunho como resposta via Gmail. Retorna True se sucesso."""
+    try:
+        state = get_pending_reply(email_id)
+        if not state or not state.get("last_reply"):
+            return False
+        draft_content = state["last_reply"]
+        sender_email = state.get("sender", "")
+        success = await _gmail.send_reply(email_id, draft_content, account, to=sender_email)
+        if success:
+            clear_pending_reply(email_id)
+        return success
+    except Exception as e:
+        logger.error(f"Erro em send_draft: {e}")
+        return False
 
 async def action_create_task(email_id: str, subject: str, urgency: str, task_details: str, client: httpx.AsyncClient, chat_id: int):
-    """📋 Criar tarefa no Notion com detalhes personalizados"""
+    """📋 Criar tarefa no Notion (envia mensagem nova — exceção permitida)"""
     try:
-        # Mapear urgência para prioridade Notion
         PRIORITY_MAP = {
             "critical": "Crítica",
             "high": "Alta",
             "medium": "Média",
             "low": "Baixa"
         }
-        
-        # Se não tiver detalhes, usar o assunto do email
         if not task_details or task_details.strip() == "":
             task_details = subject
-        
         title = f"[{urgency.upper()}] {task_details[:90]}"
         prioridade = PRIORITY_MAP.get(urgency, "Média")
-        
-        # Criar task no Notion
+
         async with httpx.AsyncClient(timeout=30.0) as notion_client:
             response = await notion_client.post(
                 "https://api.notion.com/v1/pages",
@@ -414,7 +476,6 @@ async def action_create_task(email_id: str, subject: str, urgency: str, task_det
                     }
                 }
             )
-            
             if response.status_code == 200:
                 data = response.json()
                 page_id = data["id"]
@@ -431,62 +492,12 @@ async def action_create_task(email_id: str, subject: str, urgency: str, task_det
         logger.error(f"Erro em create_task: {e}")
         await send_message(client, chat_id, f"❌ Erro: {str(e)[:100]}")
 
-async def action_archive(email_id: str, account: str, client: httpx.AsyncClient, chat_id: int):
-    """🗑️ Arquivar email"""
-    await action_mark_read(email_id, account, client, chat_id)
-
-async def action_spam(email_id: str, account: str, sender: str, client: httpx.AsyncClient, chat_id: int, message_id: int):
-    """🚫 Marcar como spam"""
-    try:
-        success = await _gmail.mark_as_spam(email_id, account)
-        if success:
-            add_to_blacklist(sender, "marcado como spam pelo usuário", account=account)
-            await mark_message_done(chat_id, message_id, "🚫 Marcado como spam", client, email_id)
-        else:
-            await send_message(client, chat_id, f"⚠️ Erro ao marcar como spam")
-    except Exception as e:
-        logger.error(f"Erro em spam: {e}")
-
-async def action_vip(sender: str, client: httpx.AsyncClient, chat_id: int, account: str = ""):
-    """⭐ Adicionar remetente como VIP"""
-    try:
-        # Adicionar à lista VIP (scoped por account)
-        result = add_vip(sender, sender.split('@')[0] if '@' in sender else sender, account=account)
-        
-        if result:
-            await send_message(client, chat_id,
-                f"⭐ <b>VIP adicionado!</b>\n"
-                f"📧 {sender}\n"
-                f"🔔 Próximos emails serão classificados como ALTA prioridade")
-        else:
-            await send_message(client, chat_id,
-                f"ℹ️ {sender} já está na lista VIP")
-    except Exception as e:
-        logger.error(f"Erro em vip: {e}")
-
-async def action_silence(sender: str, client: httpx.AsyncClient, chat_id: int, account: str = ""):
-    """🔇 Silenciar remetente"""
-    try:
-        # Adicionar à blacklist (scoped por account)
-        result = add_to_blacklist(sender, "silenciado pelo usuário", account=account)
-        
-        if result:
-            await send_message(client, chat_id,
-                f"🔇 <b>Remetente silenciado</b>\n"
-                f"📧 {sender}\n"
-                f"🔕 Não receberá mais notificações")
-        else:
-            await send_message(client, chat_id,
-                f"ℹ️ {sender} já está na blacklist")
-    except Exception as e:
-        logger.error(f"Erro em silence: {e}")
-
-async def action_reclassify_start(email_id: str, original_message: dict, client: httpx.AsyncClient):
+async def action_reclassify_start(email_id: str, original_message: dict, client: httpx.AsyncClient, account: str = ""):
     """🔄 Troca os botões para mostrar opções de urgência"""
     chat_id = original_message.get("chat", {}).get("id")
     message_id = original_message.get("message_id")
     text = original_message.get("text", "")
-    
+
     # Extrair dados da mensagem original
     sender = ""
     if "De:" in text or "📨" in text:
@@ -494,12 +505,12 @@ async def action_reclassify_start(email_id: str, original_message: dict, client:
             if "De:" in line or "📨" in line:
                 sender = line.replace("De:", "").replace("📨", "").strip()
                 break
-    
-    # Guardar estado
+
     pending_actions[email_id] = {
         "chat_id": chat_id,
         "message_id": message_id,
         "sender": sender,
+        "account": account,
         "original_text": text,
         "original_urgency": extract_urgency_from_message(text),
         "keywords": extract_keywords_from_message(text)
@@ -573,40 +584,11 @@ async def action_reclassify_complete(email_id: str, new_urgency: str, client: ht
     
     new_text = "\n".join(updated_lines)
     
-    # 3. Criar botões originais de volta
-    # Callback data deve ser simples e curto
-    keyboard = {
-        "inline_keyboard": [
-            [
-                {"text": "✉️ Enviar", "callback_data": f"send_draft:{email_id}"},
-                {"text": "📝 Tarefa", "callback_data": f"create_task:{email_id}"}
-            ],
-            [
-                {"text": "✅ Arquivar", "callback_data": f"archive:{email_id}"},
-                {"text": "⭐ VIP", "callback_data": f"vip:{email_id}"}
-            ],
-            [
-                {"text": "💬 Custom", "callback_data": f"custom_reply:{email_id}"},
-                {"text": "🔄 Reclassificar", "callback_data": f"reclassify:{email_id}"}
-            ],
-            [
-                {"text": "🔇 Silenciar", "callback_data": f"silence:{email_id}"},
-                {"text": "🗑️ Spam", "callback_data": f"spam:{email_id}"}
-            ],
-            [
-                {"text": "🔗 Abrir no Gmail", "url": f"https://mail.google.com/mail/u/0/#inbox/{email_id}"}
-            ]
-        ]
-    }
-    
+    # 3. Criar botões originais de volta (com account!)
+    keyboard = _build_original_keyboard(email_id, account)
+
     # 4. Editar mensagem com novo texto E botões originais
-    # IMPORTANTE: escapar TODO o HTML para evitar erros
-    import html as html_module
-    
-    # Escapar todo o texto
-    escaped_text = html_module.escape(new_text)
-    
-    # Enviar como texto plano (sem parse_mode HTML)
+    # Tentar editar com HTML primeiro, fallback sem HTML
     success = False
     try:
         response = await client.post(
@@ -614,7 +596,8 @@ async def action_reclassify_complete(email_id: str, new_urgency: str, client: ht
             json={
                 "chat_id": chat_id,
                 "message_id": original_message_id,
-                "text": escaped_text[:4000],
+                "text": new_text[:4000],
+                "parse_mode": "HTML",
                 "reply_markup": keyboard
             }
         )
@@ -622,13 +605,27 @@ async def action_reclassify_complete(email_id: str, new_urgency: str, client: ht
             success = True
             logger.info(f"Mensagem editada com sucesso")
         else:
-            logger.error(f"Erro ao editar: {response.status_code} - {response.text}")
-            # Não limpar o estado se falhou
-            return
+            # Fallback: sem parse_mode HTML
+            logger.warning(f"Falha HTML, tentando sem parse_mode: {response.status_code}")
+            import html as html_module
+            response2 = await client.post(
+                f"{API_BASE}/editMessageText",
+                json={
+                    "chat_id": chat_id,
+                    "message_id": original_message_id,
+                    "text": html_module.escape(new_text[:4000]),
+                    "reply_markup": keyboard
+                }
+            )
+            if response2.status_code == 200:
+                success = True
+            else:
+                logger.error(f"Erro ao editar (fallback): {response2.status_code} - {response2.text}")
+                return
     except Exception as e:
         logger.error(f"Erro ao editar mensagem: {e}")
         return
-    
+
     # Limpar estado APENAS se sucesso
     if success and email_id in pending_actions:
         del pending_actions[email_id]
@@ -636,47 +633,7 @@ async def action_reclassify_complete(email_id: str, new_urgency: str, client: ht
     
     logger.info(f"Reclassificação completa: {email_id[:15]} | {original_urgency} -> {new_urgency}")
 
-async def action_send_draft(email_id: str, account: str, client: httpx.AsyncClient, chat_id: int):
-    """✉️ Enviar rascunho"""
-    try:
-        # 1. Extrair rascunho do estado pendente (está no pending_custom_replies)
-        state = get_pending_reply(email_id)
-        if not state:
-            await send_message(client, chat_id,
-                f"❌ <b>Erro:</b> Rascunho não encontrado. O rascunho expirou.")
-            return
-        
-        # Obter rascunho e dados do remetente
-        draft_content = state.get("last_reply", "")
-        sender_email = state.get("sender", "")
-        original_text = state.get("original_text", "")
-        
-        if not draft_content:
-            await send_message(client, chat_id,
-                f"❌ <b>Erro:</b> Rascunho vazio.")
-            return
-        
-        # 2. Enviar resposta via Gmail API
-        await send_message(client, chat_id,
-            f"✉️ <b>Enviando resposta...</b>\n"
-            f"📧 Para: {sender_email}\n"
-            f"📝 Comprimento: {len(draft_content)} caracteres")
-
-        success = await _gmail.send_reply(
-            email_id, draft_content, account,
-            to=sender_email
-        )
-
-        if success:
-            await mark_message_done(chat_id, state.get("message_id"), "✅ Respondido", client, email_id)
-            clear_pending_reply(email_id)
-        else:
-            await send_message(client, chat_id,
-                f"❌ <b>Erro ao enviar resposta</b>")
-            
-    except Exception as e:
-        logger.error(f"Erro em send_draft: {e}")
-        await send_message(client, chat_id, f"❌ Erro interno: {str(e)[:100]}")
+# action_send_draft removido — substituído por action_send_draft_exec() + confirm flow
 
 # ============================================================
 # FUNÇÕES AUXILIARES PARA CONFIRMAÇÃO
@@ -692,8 +649,8 @@ async def show_confirmation_buttons(
     sender: str,
     original_text: str
 ):
-    """Mostra botões de confirmação para uma ação"""
-    
+    """Mostra botões de confirmação — edita a mensagem original (nunca envia nova)"""
+
     # Salvar estado temporário
     pending_actions[email_id] = {
         "chat_id": chat_id,
@@ -703,31 +660,36 @@ async def show_confirmation_buttons(
         "sender": sender,
         "original_text": original_text
     }
-    
+    save_pending_actions()
+
     # Definir texto de confirmação baseado na ação
     action_texts = {
+        "archive": "✅ <b>Arquivar Email</b>",
+        "vip": "⭐ <b>Marcar como VIP</b>",
         "silence": "🔇 <b>Silenciar Remetente</b>",
         "spam": "🚫 <b>Marcar como Spam</b>",
         "send_draft": "✉️ <b>Enviar Rascunho</b>"
     }
-    
+
     action_warnings = {
+        "archive": "⚠️ Este email será arquivado no Gmail.",
+        "vip": f"⚠️ O remetente <b>{sender}</b> será adicionado à lista VIP.\nEmails dele sempre terão prioridade alta.",
         "silence": "⚠️ Este remetente será adicionado à blacklist.\nVocê não receberá mais notificações dele.",
         "spam": "⚠️ Este email será marcado como spam.\nO remetente será adicionado à blacklist.",
         "send_draft": "⚠️ O rascunho será enviado como resposta."
     }
-    
-    # Teclado de confirmação
+
+    # Teclado de confirmação (callback sem sender — sender está no pending_actions)
     keyboard = {
         "inline_keyboard": [
             [
-                {"text": "✅ Confirmar", "callback_data": f"confirm_{action}:{email_id}:{account}:{sender}"},
-                {"text": "❌ Cancelar", "callback_data": f"cancel_{action}:{email_id}:{account}:{sender}"}
+                {"text": "✅ Confirmar", "callback_data": f"confirm_{action}:{email_id}:{account}"},
+                {"text": "❌ Cancelar", "callback_data": f"cancel_{action}:{email_id}:{account}"}
             ]
         ]
     }
-    
-    # Mostrar confirmação
+
+    # Editar mensagem existente com confirmação (NÃO envia nova mensagem)
     await edit_message_text(
         client, chat_id, message_id,
         f"{action_texts.get(action, '⚠️ Confirmar Ação')}\n\n"
@@ -737,35 +699,36 @@ async def show_confirmation_buttons(
         reply_markup=keyboard
     )
 
-async def mark_message_done(chat_id: int, message_id: int, status: str, client: httpx.AsyncClient, email_id: str = None):
-    """Adiciona status no final da mensagem e remove botões"""
-    
-    # Buscar texto original
-    original_text = None
-    if email_id and email_id in pending_actions:
-        original_text = pending_actions[email_id].get("original_text")
-    
+async def mark_message_done(chat_id: int, message_id: int, status: str, client: httpx.AsyncClient, email_id: str = None, original_text: str = None):
+    """Adiciona status no final da mensagem e remove botões.
+    Busca original_text de pending_actions se não fornecido."""
+
+    if not original_text:
+        if email_id and email_id in pending_actions:
+            original_text = pending_actions[email_id].get("original_text")
+
     if not original_text:
         logger.warning(f"Texto original não encontrado para email_id={email_id}")
         return
-    
+
     # Preparar timestamp formatado
     timestamp = datetime.now().strftime("%d/%m às %H:%M")
-    
+
     # Adicionar status no final
     new_text = original_text + f"\n\n───\n{status} em {timestamp}"
-    
+
     # Editar mensagem removendo botões
     await edit_message_text(
-        client, chat_id, message_id, 
+        client, chat_id, message_id,
         new_text,
         reply_markup={"inline_keyboard": []}
     )
-    
+
     # Limpar estado
     if email_id and email_id in pending_actions:
         del pending_actions[email_id]
-    
+        save_pending_actions()
+
     logger.info(f"Mensagem marcada como feita: {status}")
 
 # ============================================================
@@ -852,35 +815,10 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
     # Callback: cancel_reclassify - volta botões originais
     if action == "cancel_reclassify":
         await answer_callback(client, callback_id, "❌ Cancelado")
-        # Voltar botões originais
         if email_id in pending_actions:
             state = pending_actions[email_id]
-            
-            keyboard = {
-                "inline_keyboard": [
-                    [
-                        {"text": "✉️ Enviar", "callback_data": f"send_draft:{email_id}"},
-                        {"text": "📝 Tarefa", "callback_data": f"create_task:{email_id}"}
-                    ],
-                    [
-                        {"text": "✅ Arquivar", "callback_data": f"archive:{email_id}"},
-                        {"text": "⭐ VIP", "callback_data": f"vip:{email_id}"}
-                    ],
-                    [
-                        {"text": "💬 Custom", "callback_data": f"custom_reply:{email_id}"},
-                        {"text": "🔄 Reclassificar", "callback_data": f"reclassify:{email_id}"}
-                    ],
-                    [
-                        {"text": "🔇 Silenciar", "callback_data": f"silence:{email_id}"},
-                        {"text": "🗑️ Spam", "callback_data": f"spam:{email_id}"}
-                    ],
-                    [
-                        {"text": "🔗 Abrir no Gmail", "url": f"https://mail.google.com/mail/u/0/#inbox/{email_id}"}
-                    ]
-                ]
-            }
-            
-            # Voltar botões originais
+            reclassify_account = state.get("account", account)
+            keyboard = _build_original_keyboard(email_id, reclassify_account)
             try:
                 await client.post(
                     f"{API_BASE}/editMessageReplyMarkup",
@@ -892,86 +830,142 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
                 )
             except Exception as e:
                 logger.error(f"Erro ao voltar botões: {e}")
-            
             del pending_actions[email_id]
             save_pending_actions()
         return
     
     # ========================================================================
     # HANDLERS DE CONFIRMAÇÃO E CANCELAMENTO
+    # Padrão: confirm_X executa → mark_message_done (edita msg original)
+    #         cancel_X → restaura texto + botões originais (nunca envia nova msg)
     # ========================================================================
-    
-    # CONFIRMAR SILENCE
+
+    # --- CONFIRMAR ARCHIVE ---
+    if action == "confirm_archive":
+        await answer_callback(client, callback_id, "✅ Arquivando...")
+        state = pending_actions.get(email_id, {})
+        confirm_account = state.get("account", account)
+        success = await action_archive_exec(email_id, confirm_account)
+        status = "✅ Arquivado" if success else "❌ Erro ao arquivar"
+        await mark_message_done(chat_id, state.get("message_id", message_id), status, client, email_id)
+        return
+
+    # --- CANCELAR ARCHIVE ---
+    if action == "cancel_archive":
+        await answer_callback(client, callback_id, "Cancelado")
+        if email_id in pending_actions:
+            state = pending_actions[email_id]
+            cancel_account = state.get("account", account)
+            await edit_message_text(
+                client, chat_id, message_id,
+                state.get("original_text", ""),
+                reply_markup=_build_original_keyboard(email_id, cancel_account)
+            )
+            del pending_actions[email_id]
+            save_pending_actions()
+        return
+
+    # --- CONFIRMAR VIP ---
+    if action == "confirm_vip":
+        await answer_callback(client, callback_id, "⭐ Adicionando VIP...")
+        state = pending_actions.get(email_id, {})
+        confirm_account = state.get("account", account)
+        confirm_sender = state.get("sender", sender)
+        success = await action_vip_exec(confirm_sender, confirm_account)
+        status = f"⭐ VIP: {confirm_sender}" if success else f"⭐ {confirm_sender} já é VIP"
+        await mark_message_done(chat_id, state.get("message_id", message_id), status, client, email_id)
+        return
+
+    # --- CANCELAR VIP ---
+    if action == "cancel_vip":
+        await answer_callback(client, callback_id, "Cancelado")
+        if email_id in pending_actions:
+            state = pending_actions[email_id]
+            cancel_account = state.get("account", account)
+            await edit_message_text(
+                client, chat_id, message_id,
+                state.get("original_text", ""),
+                reply_markup=_build_original_keyboard(email_id, cancel_account)
+            )
+            del pending_actions[email_id]
+            save_pending_actions()
+        return
+
+    # --- CONFIRMAR SILENCE ---
     if action == "confirm_silence":
         await answer_callback(client, callback_id, "🔇 Silenciando...")
-        await action_silence(sender, client, chat_id, account=account)
-        # Marcar mensagem como feita
-        if email_id in pending_actions:
-            state = pending_actions[email_id]
-            await mark_message_done(
-                state["chat_id"], 
-                state["message_id"], 
-                "🔇 Silenciado", 
-                client,
-                email_id
-            )
+        state = pending_actions.get(email_id, {})
+        confirm_account = state.get("account", account)
+        confirm_sender = state.get("sender", sender)
+        success = await action_silence_exec(confirm_sender, confirm_account)
+        status = f"🔇 Silenciado: {confirm_sender}" if success else f"🔇 {confirm_sender} já está silenciado"
+        await mark_message_done(chat_id, state.get("message_id", message_id), status, client, email_id)
         return
-    
-    # CANCELAR SILENCE
+
+    # --- CANCELAR SILENCE ---
     if action == "cancel_silence":
         await answer_callback(client, callback_id, "Cancelado")
-        # Restaurar mensagem original
         if email_id in pending_actions:
             state = pending_actions[email_id]
-            original_text = state.get("original_text", "Ação cancelada")
-            await edit_message_text(client, chat_id, message_id, original_text)
+            cancel_account = state.get("account", account)
+            await edit_message_text(
+                client, chat_id, message_id,
+                state.get("original_text", ""),
+                reply_markup=_build_original_keyboard(email_id, cancel_account)
+            )
             del pending_actions[email_id]
+            save_pending_actions()
         return
-    
-    # CONFIRMAR SPAM
+
+    # --- CONFIRMAR SPAM ---
     if action == "confirm_spam":
         await answer_callback(client, callback_id, "🚫 Marcando como spam...")
         state = pending_actions.get(email_id, {})
-        spam_msg_id = state.get("message_id", message_id)
-        await action_spam(email_id, account, sender, client, chat_id, spam_msg_id)
+        confirm_account = state.get("account", account)
+        confirm_sender = state.get("sender", sender)
+        success = await action_spam_exec(email_id, confirm_account, confirm_sender)
+        status = "🗑️ Spam" if success else "❌ Erro ao marcar como spam"
+        await mark_message_done(chat_id, state.get("message_id", message_id), status, client, email_id)
         return
-    
-    # CANCELAR SPAM
+
+    # --- CANCELAR SPAM ---
     if action == "cancel_spam":
         await answer_callback(client, callback_id, "Cancelado")
-        # Restaurar mensagem original
         if email_id in pending_actions:
             state = pending_actions[email_id]
-            original_text = state.get("original_text", "Ação cancelada")
-            await edit_message_text(client, chat_id, message_id, original_text)
+            cancel_account = state.get("account", account)
+            await edit_message_text(
+                client, chat_id, message_id,
+                state.get("original_text", ""),
+                reply_markup=_build_original_keyboard(email_id, cancel_account)
+            )
             del pending_actions[email_id]
+            save_pending_actions()
         return
-    
-    # CONFIRMAR ENVIO DE RASCUNHO
+
+    # --- CONFIRMAR ENVIO DE RASCUNHO ---
     if action == "confirm_send_draft":
         await answer_callback(client, callback_id, "✉️ Enviando resposta...")
-        await action_send_draft(email_id, account, client, chat_id)
-        # Marcar mensagem como feita
-        if email_id in pending_actions:
-            state = pending_actions[email_id]
-            await mark_message_done(
-                state["chat_id"],
-                state["message_id"],
-                "✉️ Resposta Enviada",
-                client,
-                email_id
-            )
+        state = pending_actions.get(email_id, {})
+        confirm_account = state.get("account", account)
+        success = await action_send_draft_exec(email_id, confirm_account)
+        status = "✉️ Resposta Enviada" if success else "❌ Erro ao enviar rascunho"
+        await mark_message_done(chat_id, state.get("message_id", message_id), status, client, email_id)
         return
-    
-    # CANCELAR ENVIO DE RASCUNHO
+
+    # --- CANCELAR ENVIO DE RASCUNHO ---
     if action == "cancel_send_draft":
         await answer_callback(client, callback_id, "Cancelado")
-        # Restaurar mensagem original
         if email_id in pending_actions:
             state = pending_actions[email_id]
-            original_text = state.get("original_text", "Ação cancelada")
-            await edit_message_text(client, chat_id, message_id, original_text)
+            cancel_account = state.get("account", account)
+            await edit_message_text(
+                client, chat_id, message_id,
+                state.get("original_text", ""),
+                reply_markup=_build_original_keyboard(email_id, cancel_account)
+            )
             del pending_actions[email_id]
+            save_pending_actions()
         return
     
     # ========================================================================
@@ -1026,9 +1020,27 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
         return
     
     # ========================================================================
-    # AÇÕES QUE PRECISAM DE CONFIRMAÇÃO
+    # AÇÕES QUE PRECISAM DE CONFIRMAÇÃO (editam a mensagem, nunca enviam nova)
     # ========================================================================
-    
+
+    # ARCHIVE - mostrar confirmação
+    if action == "archive":
+        await answer_callback(client, callback_id, "⚠️ Confirme a ação")
+        await show_confirmation_buttons(
+            client, chat_id, message_id,
+            "archive", email_id, account, sender, text
+        )
+        return
+
+    # VIP - mostrar confirmação
+    if action == "vip":
+        await answer_callback(client, callback_id, "⚠️ Confirme a ação")
+        await show_confirmation_buttons(
+            client, chat_id, message_id,
+            "vip", email_id, account, sender, text
+        )
+        return
+
     # SILENCE - mostrar confirmação
     if action == "silence":
         await answer_callback(client, callback_id, "⚠️ Confirme a ação")
@@ -1037,7 +1049,7 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
             "silence", email_id, account, sender, text
         )
         return
-    
+
     # SPAM - mostrar confirmação
     if action == "spam":
         await answer_callback(client, callback_id, "⚠️ Confirme a ação")
@@ -1046,7 +1058,7 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
             "spam", email_id, account, sender, text
         )
         return
-    
+
     # SEND_DRAFT - mostrar confirmação
     if action == "send_draft":
         await answer_callback(client, callback_id, "⚠️ Confirme a ação")
@@ -1055,12 +1067,21 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
             "send_draft", email_id, account, sender, text
         )
         return
-    
-    # Callback: create_task - pedir detalhes da tarefa
+
+    # RECLASSIFY - trocar botões para urgências (sem mensagem nova)
+    if action == "reclassify":
+        await answer_callback(client, callback_id, "🔄 Selecione a urgência")
+        await action_reclassify_start(email_id, message, client, account=account)
+        return
+
+    # ========================================================================
+    # AÇÕES QUE ENVIAM MENSAGEM NOVA (exceções permitidas — precisam de input)
+    # ========================================================================
+
+    # CREATE_TASK - pedir detalhes da tarefa (envia msg nova — precisa de input)
     if action == "create_task":
         await answer_callback(client, callback_id, "📝 Descreva a tarefa")
-        
-        # Salvar estado
+
         save_pending_reply(email_id, {
             "chat_id": chat_id,
             "message_id": message.get("message_id"),
@@ -1070,8 +1091,7 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
             "original_text": text,
             "waiting_task_details": True
         })
-        
-        # Enviar mensagem pedindo detalhes
+
         await send_message(client, chat_id,
             f"📝 <b>Descreva a tarefa:</b>\n\n"
             f"Exemplos:\n"
@@ -1085,12 +1105,11 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
                 ]]
             })
         return
-    
-    # Callback: cancel_create_task
+
+    # CANCEL CREATE_TASK
     if action == "cancel_create_task":
         await answer_callback(client, callback_id, "❌ Cancelado")
         clear_pending_reply(email_id)
-        # Apagar mensagem
         try:
             await client.post(
                 f"{API_BASE}/deleteMessage",
@@ -1099,21 +1118,10 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
         except Exception as e:
             logger.error(f"Erro ao apagar: {e}")
         return
-    
-    action_map = {
-        "read": ("✅ Marcando como lido...", lambda: action_mark_read(email_id, account, client, chat_id)),
-        "archive": ("🗑️ Arquivando...", lambda: action_archive(email_id, account, client, chat_id)),
-        "create_task": ("📋 Criando tarefa...", lambda: action_create_task(email_id, subject, extract_urgency_from_message(text), client, chat_id)),
-        "vip": ("⭐ Adicionando VIP...", lambda: action_vip(sender, client, chat_id, account=account)),
-        "reclassify": ("🔄 Reclassificando...", lambda: action_reclassify_start(email_id, message, client)),
-    }
-    
-    if action in action_map:
-        emoji_text, action_func = action_map[action]
-        await answer_callback(client, callback_id, emoji_text)
-        await action_func()
-    else:
-        await answer_callback(client, callback_id, f"Ação: {action}")
+
+    # Ação desconhecida
+    await answer_callback(client, callback_id, f"Ação desconhecida: {action}")
+    logger.warning(f"Callback desconhecido: {action}")
 
 # Carregar pending_actions ao iniciar
 pending_actions = load_pending_actions()
