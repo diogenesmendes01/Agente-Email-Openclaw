@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(os.getenv("EMAIL_AGENT_BASE_DIR", Path(__file__).resolve().parent.parent.parent))
 CREDENTIALS_DIR = BASE_DIR / "credentials"
+HISTORY_ID_FILE = BASE_DIR / "history_ids.json"
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.compose",
@@ -249,17 +250,55 @@ class GmailService:
             logger.error(f"Erro ao enviar resposta: {e}")
             return False
 
+    def get_stored_history_id(self, account: str) -> Optional[str]:
+        """Retorna o último historyId armazenado para a conta"""
+        try:
+            if HISTORY_ID_FILE.exists():
+                data = json.loads(HISTORY_ID_FILE.read_text(encoding="utf-8"))
+                return data.get(account)
+        except Exception as e:
+            logger.error(f"Erro ao ler historyId armazenado: {e}")
+        return None
+
+    def save_history_id(self, account: str, history_id: str):
+        """Armazena o último historyId processado para a conta"""
+        try:
+            data = {}
+            if HISTORY_ID_FILE.exists():
+                data = json.loads(HISTORY_ID_FILE.read_text(encoding="utf-8"))
+            data[account] = history_id
+            HISTORY_ID_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.error(f"Erro ao salvar historyId: {e}")
+
     async def get_history(self, history_id: str, account: str) -> List[str]:
-        """Busca IDs de mensagens desde um historyId"""
+        """Busca IDs de mensagens desde um historyId.
+
+        Usa o historyId armazenado (do watch ou webhook anterior) como startHistoryId,
+        pois o historyId da notificação Pub/Sub é o mais recente e não retornaria nada.
+        Após a consulta, atualiza o historyId armazenado.
+        """
         service = self._get_service(account)
         if not service:
             return []
+
+        # Usar o historyId armazenado como ponto de partida
+        stored_id = self.get_stored_history_id(account)
+        start_id = stored_id if stored_id else history_id
+
+        # Atualizar o armazenado com o novo (mais recente) da notificação
+        self.save_history_id(account, history_id)
+
+        if not stored_id:
+            logger.warning(f"Sem historyId armazenado para {account}. "
+                           f"Fallback para messages.list.")
+            return await self._fallback_recent_messages(service)
 
         try:
             response = await asyncio.to_thread(
                 service.users().history().list(
                     userId="me",
-                    startHistoryId=history_id,
+                    startHistoryId=start_id,
                     historyTypes=["messageAdded"],
                     labelId="INBOX"
                 ).execute
@@ -273,15 +312,33 @@ class GmailService:
                     if msg_id:
                         message_ids.append(msg_id)
 
+            logger.info(f"History retornou {len(message_ids)} mensagens (startId={start_id}, notifId={history_id})")
             return message_ids
         except HttpError as e:
             if e.resp.status == 404:
-                logger.warning(f"historyId {history_id} expirado")
-            else:
-                logger.error(f"Erro ao buscar history: {e}")
+                logger.warning(f"historyId {start_id} expirado — fallback para messages.list")
+                return await self._fallback_recent_messages(service)
+            logger.error(f"Erro ao buscar history: {e}")
             return []
         except Exception as e:
             logger.error(f"Erro inesperado ao buscar history: {e}")
+            return []
+
+    async def _fallback_recent_messages(self, service) -> List[str]:
+        """Fallback: busca mensagens recentes não lidas quando historyId não está disponível ou expirou."""
+        try:
+            response = await asyncio.to_thread(
+                service.users().messages().list(
+                    userId="me",
+                    labelIds=["INBOX", "UNREAD"],
+                    maxResults=5
+                ).execute
+            )
+            message_ids = [m["id"] for m in response.get("messages", [])]
+            logger.info(f"Fallback messages.list retornou {len(message_ids)} mensagens")
+            return message_ids
+        except Exception as e:
+            logger.error(f"Erro no fallback messages.list: {e}")
             return []
 
     async def watch(self, account: str, topic: str, label_ids: List[str] = None) -> Optional[Dict]:
