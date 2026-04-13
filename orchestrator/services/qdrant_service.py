@@ -9,8 +9,17 @@ from datetime import datetime
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from qdrant_client.http.exceptions import UnexpectedResponse
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import httpx as _httpx
 
 logger = logging.getLogger(__name__)
+
+_retry_external = retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    retry=retry_if_exception_type((TimeoutError, ConnectionError, OSError)),
+    reraise=True,
+)
 
 
 class QdrantService:
@@ -65,6 +74,7 @@ class QdrantService:
                 )
             )
     
+    @_retry_external
     async def store_email(self, email_id: str, embedding: List[float], metadata: Dict[str, Any]) -> bool:
         """
         Armazena embedding do email no Qdrant
@@ -111,6 +121,7 @@ class QdrantService:
             logger.error(f"Erro ao armazenar email no Qdrant: {e}")
             return False
     
+    @_retry_external
     async def search_similar(
         self,
         embedding: List[float],
@@ -253,6 +264,7 @@ class QdrantService:
             logger.error(f"Erro ao atualizar feedback: {e}")
             return False
     
+    @_retry_external
     async def get_sender_profile(self, from_email: str, account: str) -> Dict[str, Any]:
         """Busca perfil de um remetente com padrões de correção."""
         if not self._connected:
@@ -332,6 +344,7 @@ class QdrantService:
             logger.error(f"Erro ao armazenar regras: {e}")
             return False
 
+    @_retry_external
     async def get_learned_rules(
         self, account: str, min_confidence: float = 0.7
     ) -> List[Dict[str, Any]]:

@@ -7,8 +7,17 @@ import logging
 import html
 from typing import Dict, Any, Optional
 import httpx
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import httpx as _httpx
 
 logger = logging.getLogger(__name__)
+
+_retry_external = retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    retry=retry_if_exception_type((TimeoutError, ConnectionError, OSError)),
+    reraise=True,
+)
 
 
 class TelegramService:
@@ -46,6 +55,7 @@ class TelegramService:
     # Limite do Telegram para mensagens
     MAX_MESSAGE_LENGTH = 4096
 
+    @_retry_external
     async def send_email_notification(
         self,
         email: Dict[str, Any],
