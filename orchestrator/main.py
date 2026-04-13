@@ -64,6 +64,9 @@ from orchestrator.services.gmail_service import GmailService
 from orchestrator.services.telegram_service import TelegramService
 from orchestrator.handlers.email_processor import EmailProcessor
 from orchestrator.services.learning_engine import LearningEngine
+from orchestrator.services.metrics_service import MetricsService
+from orchestrator.services.alert_service import AlertService
+from orchestrator.services.job_queue import JobQueue
 
 # Serviços que não precisam de init async ficam no nível de módulo
 qdrant = QdrantService()
@@ -76,11 +79,14 @@ db: DatabaseService = None
 pdf_reader: PdfReader = None
 learning: LearningEngine = None
 processor: EmailProcessor = None
+metrics: MetricsService = None
+alerts: AlertService = None
+job_queue: JobQueue = None
 
 
 @asynccontextmanager
 async def lifespan(app_instance):
-    global db, pdf_reader, learning, processor
+    global db, pdf_reader, learning, processor, metrics, alerts, job_queue
     _settings = get_settings()
 
     # Create DB pool
@@ -92,11 +98,68 @@ async def lifespan(app_instance):
         vision_model=_settings.llm_vision_model,
         openrouter_key=_settings.openrouter_api_key,
     )
-    learning = LearningEngine(qdrant, telegram)
-    processor = EmailProcessor(db, qdrant, llm, gmail, telegram, learning, pdf_reader)
 
-    logger.info("Email Agent v2.0 started — PostgreSQL connected")
+    # Phase 2 services
+    metrics = MetricsService(pool)
+    alerts = AlertService(
+        bot_token=_settings.telegram_bot_token,
+        alert_user_id=_settings.telegram_alert_user_id,
+        throttle_minutes=_settings.alert_throttle_minutes,
+    )
+    job_queue = JobQueue(pool, max_attempts=_settings.job_max_attempts)
+
+    learning = LearningEngine(qdrant, telegram)
+    processor = EmailProcessor(db, qdrant, llm, gmail, telegram, learning, pdf_reader, metrics, job_queue)
+
+    # Background workers
+    import asyncio
+
+    async def retry_worker():
+        """Retries failed jobs every 60 seconds."""
+        while True:
+            try:
+                jobs = await job_queue.get_pending(limit=5)
+                for job in jobs:
+                    try:
+                        if job["job_type"] == "process_email":
+                            payload = json.loads(job["payload"]) if isinstance(job["payload"], str) else job["payload"]
+                            await processor.process_email(payload["email_id"], payload["account"])
+                        await job_queue.mark_completed(job["id"])
+                    except Exception as e:
+                        is_dead = await job_queue.mark_failed(job["id"], str(e))
+                        if is_dead:
+                            await alerts.alert("job_dead", f"Job #{job['id']} ({job['job_type']}) died: {e}")
+            except Exception as e:
+                logger.error(f"Retry worker error: {e}")
+            await asyncio.sleep(60)
+
+    async def maintenance_worker():
+        """Daily maintenance — cleanup old metrics. Runs once at startup, then every 24h."""
+        while True:
+            try:
+                result = await metrics.cleanup(retention_days=_settings.metrics_retention_days)
+                logger.info(f"Metrics cleanup: {result}")
+            except Exception as e:
+                logger.error(f"Metrics cleanup error: {e}")
+            await asyncio.sleep(86400)
+
+    retry_task = asyncio.create_task(retry_worker())
+    maint_task = asyncio.create_task(maintenance_worker())
+
+    logger.info("Email Agent v2.0 started — PostgreSQL connected, workers running")
     yield
+
+    # Graceful shutdown
+    retry_task.cancel()
+    maint_task.cancel()
+    try:
+        await retry_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await maint_task
+    except asyncio.CancelledError:
+        pass
     await pool.close()
     logger.info("Email Agent shutdown — pool closed")
 
@@ -131,9 +194,13 @@ async def health_check():
         "llm": llm.is_configured(),
         "gmail": gmail.is_ready(),
     }
+    queue_info = {}
     try:
         if db:
             checks["postgres"] = await db.is_connected()
+        if job_queue:
+            queue_info["pending_jobs"] = await job_queue.get_pending_count()
+            queue_info["dead_jobs"] = await job_queue.get_dead_count()
     except Exception:
         pass
 
@@ -141,7 +208,8 @@ async def health_check():
     return {
         "status": status,
         "timestamp": datetime.utcnow().isoformat(),
-        "services": {k: "connected" if v else "disconnected" for k, v in checks.items()}
+        "services": {k: "connected" if v else "disconnected" for k, v in checks.items()},
+        "queue": queue_info,
     }
 
 

@@ -74,6 +74,11 @@ class Settings:
         # Learning
         self.learning_interval: int = int(os.getenv("LEARNING_INTERVAL", "50"))
 
+        # Observability
+        self.metrics_retention_days: int = int(os.getenv("METRICS_RETENTION_DAYS", "90"))
+        self.alert_throttle_minutes: int = int(os.getenv("ALERT_THROTTLE_MINUTES", "15"))
+        self.job_max_attempts: int = int(os.getenv("JOB_MAX_ATTEMPTS", "5"))
+
         logger.info(
             "Settings loaded: %d Gmail accounts, model=%s",
             len(self.gmail_accounts),

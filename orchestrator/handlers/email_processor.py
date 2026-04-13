@@ -32,7 +32,9 @@ class EmailProcessor:
         gmail: GmailService,
         telegram: TelegramService,
         learning: LearningEngine = None,
-        pdf_reader: PdfReader = None
+        pdf_reader: PdfReader = None,
+        metrics=None,
+        job_queue=None,
     ):
         self.db = db
         self.qdrant = qdrant
@@ -41,6 +43,8 @@ class EmailProcessor:
         self.telegram = telegram
         self.learning = learning
         self.pdf_reader = pdf_reader
+        self.metrics = metrics
+        self.job_queue = job_queue
         self.parser = EmailParser()
         self.cleaner = TextCleaner()
         self._learning_interval = int(os.getenv("LEARNING_INTERVAL", "50"))
@@ -257,15 +261,39 @@ class EmailProcessor:
                 except Exception as e:
                     logger.error(f"[{email_id}] Erro no learning engine: {e}")
 
+            # Record metrics
+            if self.metrics and account_id:
+                await self.metrics.record(
+                    event="email_processed",
+                    service="pipeline",
+                    account_id=account_id,
+                    tokens_used=total_reasoning_tokens,
+                    success=True,
+                )
+
             result["status"] = "success"
             logger.info(f"[{email_id}] Processamento concluído")
-            
+
             return result
-            
+
         except Exception as e:
             logger.error(f"[{email_id}] Erro no processamento: {e}", exc_info=True)
             result["status"] = "error"
             result["error"] = str(e)
+
+            # Enqueue for retry
+            if self.job_queue:
+                try:
+                    acct = await self.db.get_account(account) if account else None
+                    acct_id = acct["id"] if acct else None
+                    await self.job_queue.enqueue(
+                        job_type="process_email",
+                        payload={"email_id": email_id, "account": account},
+                        account_id=acct_id,
+                    )
+                except Exception as enq_err:
+                    logger.error(f"[{email_id}] Failed to enqueue retry: {enq_err}")
+
             return result
     
     async def _execute_action(
