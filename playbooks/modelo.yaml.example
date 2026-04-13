@@ -1,0 +1,31 @@
+# Exemplo de configuração de playbooks — copie para um .yaml na mesma pasta
+# Pasta playbooks/ está no .gitignore (dados sensíveis)
+
+empresa: "Nome da Empresa"
+cnpj: "00.000.000/0001-00"
+tom: "formal, empático"
+assinatura: |
+  Atenciosamente,
+  Equipe {empresa}
+whatsapp_reembolso: "https://wa.me/5500000000000"
+
+playbooks:
+  - gatilho: "dúvida sobre boleto/proposta"
+    auto: true
+    template: |
+      Prezado(a) {nome_contato},
+
+      Agradecemos seu contato. Segue em anexo a segunda via do documento solicitado.
+
+      Caso tenha dúvidas adicionais, entre em contato via WhatsApp: {whatsapp_reembolso}
+
+      {assinatura}
+
+  - gatilho: "reclamação sobre entrega"
+    auto: false
+    template: |
+      Prezado(a) {nome_contato},
+
+      Lamentamos pelo transtorno. Estamos verificando a situação e retornaremos em breve.
+
+      {assinatura}

@@ -16,5 +16,6 @@ pending_actions.json
 pending_replies.json
 credentials/
 pgdata/
-playbooks/
+playbooks/*
+!playbooks/modelo.yaml.example
 history_ids.json
