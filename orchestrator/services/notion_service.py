@@ -96,6 +96,10 @@ class NotionService:
                 "Email ID": {"rich_text": [{"text": {"content": task.get("email_id", "")}}]}
             }
 
+            # Conta (account) - para separar tarefas por conta
+            if account and "@" in account:
+                properties["Conta"] = {"email": account}
+
             if task.get("prazo"):
                 properties["Prazo"] = {"date": {"start": task["prazo"]}}
 
@@ -138,6 +142,11 @@ class NotionService:
                 "Timestamp": {"date": {"start": decision.get("timestamp", "")}},
                 "Resumo": {"rich_text": [{"text": {"content": decision.get("resumo", "")[:200]}}]}
             }
+
+            # Conta (account) - para separar decisões por conta
+            account = decision.get("account", "")
+            if account and "@" in account:
+                properties["Conta"] = {"email": account}
 
             from_email = decision.get("from", "")
             if from_email and "@" in from_email:
