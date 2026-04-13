@@ -7,7 +7,7 @@ import os
 import json
 import logging
 from datetime import datetime
-from typing import Optional, Set
+from typing import Optional
 from collections import OrderedDict
 from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
@@ -43,7 +43,57 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 limiter = Limiter(key_func=get_remote_address)
-app = FastAPI(title="Email Agent", version="1.0.0")
+
+# Importar serviços
+import asyncpg
+from contextlib import asynccontextmanager
+from orchestrator.settings import get_settings
+from orchestrator.services.database_service import DatabaseService
+from orchestrator.utils.pdf_reader import PdfReader
+from orchestrator.services.qdrant_service import QdrantService
+from orchestrator.services.llm_service import LLMService
+from orchestrator.services.gmail_service import GmailService
+from orchestrator.services.telegram_service import TelegramService
+from orchestrator.handlers.email_processor import EmailProcessor
+from orchestrator.services.learning_engine import LearningEngine
+
+# Serviços que não precisam de init async ficam no nível de módulo
+qdrant = QdrantService()
+llm = LLMService()
+gmail = GmailService()
+telegram = TelegramService()
+
+# Estes serão inicializados no lifespan (precisam de pool async)
+db: DatabaseService = None
+pdf_reader: PdfReader = None
+learning: LearningEngine = None
+processor: EmailProcessor = None
+
+
+@asynccontextmanager
+async def lifespan(app_instance):
+    global db, pdf_reader, learning, processor
+    _settings = get_settings()
+
+    # Create DB pool
+    pool = await asyncpg.create_pool(
+        dsn=_settings.database_url, min_size=2, max_size=10
+    )
+    db = DatabaseService(pool)
+    pdf_reader = PdfReader(
+        vision_model=_settings.llm_vision_model,
+        openrouter_key=_settings.openrouter_api_key,
+    )
+    learning = LearningEngine(qdrant, telegram)
+    processor = EmailProcessor(db, qdrant, llm, gmail, telegram, learning, pdf_reader)
+
+    logger.info("Email Agent v2.0 started — PostgreSQL connected")
+    yield
+    await pool.close()
+    logger.info("Email Agent shutdown — pool closed")
+
+
+app = FastAPI(title="Email Agent", version="2.0.0", lifespan=lifespan)
 app.state.limiter = limiter
 
 
@@ -55,26 +105,6 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 _processed_emails: OrderedDict = OrderedDict()
 MAX_PROCESSED_CACHE = 1000
 
-# Importar serviços
-from orchestrator.services.notion_service import NotionService
-from orchestrator.services.qdrant_service import QdrantService
-from orchestrator.services.llm_service import LLMService
-from orchestrator.services.gmail_service import GmailService
-from orchestrator.services.telegram_service import TelegramService
-from orchestrator.handlers.email_processor import EmailProcessor
-from orchestrator.services.company_service import CompanyService
-from orchestrator.services.learning_engine import LearningEngine
-
-# Inicializar serviços
-notion = NotionService()
-qdrant = QdrantService()
-llm = LLMService()
-gmail = GmailService()
-telegram = TelegramService()
-company = CompanyService()
-learning = LearningEngine(qdrant, telegram)
-processor = EmailProcessor(notion, qdrant, llm, gmail, telegram, company, learning)
-
 
 class GmailWebhookPayload(BaseModel):
     """Payload do webhook do Gmail via GOG"""
@@ -83,25 +113,27 @@ class GmailWebhookPayload(BaseModel):
     token: Optional[str] = None
 
 
-class HealthResponse(BaseModel):
-    status: str
-    timestamp: str
-    services: dict
-
-
-@app.get("/health", response_model=HealthResponse)
+@app.get("/health")
 async def health_check():
     """Endpoint de health check"""
-    return HealthResponse(
-        status="healthy",
-        timestamp=datetime.utcnow().isoformat(),
-        services={
-            "notion": "connected" if notion.is_connected() else "disconnected",
-            "qdrant": "connected" if qdrant.is_connected() else "disconnected",
-            "llm": "configured" if llm.is_configured() else "not_configured",
-            "gmail": "ready" if gmail.is_ready() else "not_ready"
-        }
-    )
+    checks = {
+        "postgres": False,
+        "qdrant": qdrant.is_connected(),
+        "llm": llm.is_configured(),
+        "gmail": gmail.is_ready(),
+    }
+    try:
+        if db:
+            checks["postgres"] = await db.is_connected()
+    except Exception:
+        pass
+
+    status = "healthy" if all(checks.values()) else "degraded"
+    return {
+        "status": status,
+        "timestamp": datetime.utcnow().isoformat(),
+        "services": {k: "connected" if v else "disconnected" for k, v in checks.items()}
+    }
 
 
 @app.post("/hooks/gmail")
@@ -257,7 +289,10 @@ async def telegram_callback(request: Request):
             if action_type == "archive" and email_id and account:
                 await gmail.archive_email(email_id, account)
             elif action_type == "create_task" and email_id:
-                await notion.create_task({"titulo": f"Email: {email_id}", "prioridade": "Média"}, account)
+                if db:
+                    account_data = await db.get_account(account)
+                    if account_data:
+                        await db.create_task(account_data["id"], f"Email: {email_id}", "Média", email_id)
 
             if chat_id and message.get("message_id"):
                 original_text = message.get("text", "")
@@ -308,35 +343,15 @@ def _is_duplicate(email_id: str) -> bool:
 
 
 def get_account_by_token(token: str) -> Optional[str]:
-    """Identifica a conta pelo hook token via config.json"""
-    config_path = BASE_DIR / "config.json"
-    try:
-        with open(config_path) as f:
-            config = json.load(f)
-        for email_addr, acct_config in config.get("gmail", {}).get("accounts", {}).items():
-            env_var = acct_config.get("hook_token_env", "")
-            acct_token = os.getenv(env_var, "")
-            if acct_token and acct_token == token:
-                return email_addr
-    except Exception as e:
-        logger.error(f"Erro ao carregar config.json: {e}")
-
-    # Fallback: token direto de env var (sem hardcode)
-    fallback_token = os.getenv("GOG_HOOK_TOKEN")
-    fallback_account = os.getenv("GOG_HOOK_ACCOUNT")
-    if fallback_token and fallback_token == token and fallback_account:
-        return fallback_account
-
+    """Identifica a conta pelo hook token via Settings"""
+    import hmac
+    _settings = get_settings()
+    for email, hook_token in _settings.gmail_accounts.items():
+        # hook_token could be env var name or direct value
+        token_value = os.getenv(hook_token, hook_token)
+        if hmac.compare_digest(token_value, token):
+            return email
     return None
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Salvar estado antes de desligar"""
-    logger.info("Encerrando Email Agent... salvando estado.")
-    # Limpar cache de deduplicação
-    _processed_emails.clear()
-    logger.info("Email Agent encerrado.")
 
 
 if __name__ == "__main__":

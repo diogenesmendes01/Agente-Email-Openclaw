@@ -8,14 +8,14 @@ import logging
 from datetime import datetime
 from typing import Dict, Any, Optional
 
-from orchestrator.services.notion_service import NotionService
+from orchestrator.services.database_service import DatabaseService
 from orchestrator.services.qdrant_service import QdrantService
 from orchestrator.services.llm_service import LLMService
 from orchestrator.services.gmail_service import GmailService
 from orchestrator.services.telegram_service import TelegramService
 from orchestrator.utils.email_parser import EmailParser
 from orchestrator.utils.text_cleaner import TextCleaner
-from orchestrator.services.company_service import CompanyService
+from orchestrator.utils.pdf_reader import PdfReader
 from orchestrator.services.learning_engine import LearningEngine
 
 logger = logging.getLogger(__name__)
@@ -26,21 +26,21 @@ class EmailProcessor:
 
     def __init__(
         self,
-        notion: NotionService,
+        db: DatabaseService,
         qdrant: QdrantService,
         llm: LLMService,
         gmail: GmailService,
         telegram: TelegramService,
-        company: CompanyService = None,
-        learning: LearningEngine = None
+        learning: LearningEngine = None,
+        pdf_reader: PdfReader = None
     ):
-        self.notion = notion
+        self.db = db
         self.qdrant = qdrant
         self.llm = llm
         self.gmail = gmail
         self.telegram = telegram
-        self.company = company
         self.learning = learning
+        self.pdf_reader = pdf_reader
         self.parser = EmailParser()
         self.cleaner = TextCleaner()
         self._learning_interval = int(os.getenv("LEARNING_INTERVAL", "50"))
@@ -94,7 +94,20 @@ class EmailProcessor:
             else:
                 email = raw_email  # Já parseado pelo GOGService
             email["body_clean"] = self.cleaner.clean(email.get("body", ""))
-            
+
+            # Extract PDF attachment text
+            if self.pdf_reader:
+                for attachment in email.get("attachments", []):
+                    if attachment.get("mimeType") == "application/pdf":
+                        logger.info(f"[{email_id}] Extracting PDF: {attachment['filename']}")
+                        pdf_bytes = await self.gmail.get_attachment(
+                            email_id, attachment["attachmentId"], account
+                        )
+                        if pdf_bytes:
+                            pdf_text = await self.pdf_reader.extract(pdf_bytes)
+                            if pdf_text:
+                                email["body_clean"] += f"\n\n--- ANEXO PDF: {attachment['filename']} ---\n{pdf_text}"
+
             # 2.5. Buscar contexto da thread se houver
             thread_id = email.get("threadId")
             thread_context = []
@@ -108,7 +121,7 @@ class EmailProcessor:
             
             # 3. Buscar contexto
             logger.info(f"[{email_id}] Buscando contexto...")
-            config = await self.notion.get_account_config(account)
+            config = await self.db.get_account_config(account)
             
             context = {
                 "vips": config.get("vips", []),
@@ -131,39 +144,11 @@ class EmailProcessor:
             else:
                 context["similar_emails"] = []
 
-            # Fetch company profile (cached)
-            if self.company:
-                try:
-                    company_profile = await self.company.get_profile(account)
-                    context["company_profile"] = company_profile
-
-                    # Cross-reference sender with clients
-                    from_email = email.get("from_email", "") or email.get("from", "")
-                    if company_profile.get("clientes"):
-                        client = self.company.is_client_contact(from_email, company_profile["clientes"])
-                        if client:
-                            context["sender_profile_client"] = client
-
-                    # Domain rules from Notion
-                    if company_profile.get("domain_rules"):
-                        context["domain_rules"] = company_profile["domain_rules"]
-                        domain_match = self.company.match_domain_rule(from_email, company_profile["domain_rules"])
-                        if domain_match:
-                            context["domain_match"] = domain_match
-                except Exception as e:
-                    logger.warning(f"[{email_id}] Erro ao buscar company profile: {e}")
-
             # Fetch sender profile from Qdrant
             if self.qdrant.is_connected():
                 try:
                     from_email = email.get("from_email", "") or email.get("from", "")
                     sender_profile = await self.qdrant.get_sender_profile(from_email, account)
-                    # Enrich with client info
-                    if context.get("sender_profile_client"):
-                        client = context["sender_profile_client"]
-                        sender_profile["is_client"] = True
-                        sender_profile["client_name"] = client.get("nome", "")
-                        sender_profile["client_project"] = client.get("projeto", "")
                     context["sender_profile"] = sender_profile
                 except Exception as e:
                     logger.warning(f"[{email_id}] Erro ao buscar sender profile: {e}")
@@ -212,8 +197,13 @@ class EmailProcessor:
                 "timestamp": result["timestamp"]
             }
             
-            notion_page_id = await self.notion.log_decision(decision_data)
-            result["notion_page_id"] = notion_page_id
+            # Get account_id for DB operations
+            account_data = await self.db.get_account(account)
+            account_id = account_data["id"] if account_data else None
+            if account_id:
+                decision_data["account_id"] = account_id
+            decision_id = await self.db.log_decision(decision_data)
+            result["decision_id"] = decision_id
             
             # Armazenar no Qdrant
             if self.qdrant.is_connected() and result.get("embedding"):
@@ -248,10 +238,10 @@ class EmailProcessor:
             result["telegram_message_id"] = message_id
             result["reasoning_tokens"] = total_reasoning_tokens
             
-            # Lazy-load counter from Qdrant on first successful email
-            if not self._counter_loaded and self.qdrant.is_connected():
+            # Lazy-load counter from database on first successful email
+            if not self._counter_loaded and account_id:
                 try:
-                    self._emails_processed = await self.qdrant.get_learning_counter(account) or 0
+                    self._emails_processed = await self.db.get_learning_counter(account_id)
                     self._counter_loaded = True
                 except Exception:
                     pass
@@ -262,7 +252,8 @@ class EmailProcessor:
                 try:
                     logger.info(f"[{email_id}] Disparando ciclo de aprendizado (#{self._emails_processed})")
                     await self.learning.analyze_and_learn(account)
-                    await self.qdrant.update_learning_counter(account, self._emails_processed)
+                    if account_id:
+                        await self.db.update_learning_counter(account_id, self._emails_processed)
                 except Exception as e:
                     logger.error(f"[{email_id}] Erro no learning engine: {e}")
 
@@ -293,8 +284,14 @@ class EmailProcessor:
         
         elif acao == "criar_task":
             task = action.get("task", {})
-            task["email_id"] = email_id
-            await self.notion.create_task(task, account)
+            account_data = await self.db.get_account(account)
+            if account_data:
+                await self.db.create_task(
+                    account_id=account_data["id"],
+                    title=task.get("titulo", f"Task from email {email_id}"),
+                    priority=task.get("prioridade", "Média"),
+                    email_id=email_id,
+                )
             logger.info(f"Task criada para email {email_id}")
         
         elif acao == "rascunho":
