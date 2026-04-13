@@ -35,11 +35,19 @@ if log_dir.exists() or os.getenv("EMAIL_AGENT_LOG_FILE"):
     log_dir.mkdir(parents=True, exist_ok=True)
     log_handlers.append(logging.FileHandler(log_dir / "email_agent.log"))
 
+from orchestrator.middleware.request_id import RequestIdFilter, RequestIdMiddleware
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s [req:%(request_id)s] %(name)s - %(levelname)s - %(message)s',
     handlers=log_handlers
 )
+
+# Add request_id filter to all handlers
+_rid_filter = RequestIdFilter()
+for handler in logging.root.handlers:
+    handler.addFilter(_rid_filter)
+
 logger = logging.getLogger(__name__)
 
 limiter = Limiter(key_func=get_remote_address)
@@ -94,6 +102,7 @@ async def lifespan(app_instance):
 
 
 app = FastAPI(title="Email Agent", version="2.0.0", lifespan=lifespan)
+app.add_middleware(RequestIdMiddleware)
 app.state.limiter = limiter
 
 
