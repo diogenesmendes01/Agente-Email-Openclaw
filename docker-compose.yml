@@ -35,6 +35,7 @@ services:
       - QDRANT_PORT=6333
     volumes:
       - ./config.json:/app/config.json:ro
+      - ./credentials:/app/credentials:ro
       - ./vip-list.json:/app/vip-list.json
       - ./blacklist.json:/app/blacklist.json
       - ./feedback.json:/app/feedback.json
@@ -64,6 +65,7 @@ services:
       - QDRANT_PORT=6333
     volumes:
       - ./config.json:/app/config.json:ro
+      - ./credentials:/app/credentials:ro
       - ./vip-list.json:/app/vip-list.json
       - ./blacklist.json:/app/blacklist.json
       - ./feedback.json:/app/feedback.json

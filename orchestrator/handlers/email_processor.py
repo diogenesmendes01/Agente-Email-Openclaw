@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional
 from orchestrator.services.notion_service import NotionService
 from orchestrator.services.qdrant_service import QdrantService
 from orchestrator.services.llm_service import LLMService
-from orchestrator.services.gog_service import GOGService
+from orchestrator.services.gmail_service import GmailService
 from orchestrator.services.telegram_service import TelegramService
 from orchestrator.utils.email_parser import EmailParser
 from orchestrator.utils.text_cleaner import TextCleaner
@@ -29,7 +29,7 @@ class EmailProcessor:
         notion: NotionService,
         qdrant: QdrantService,
         llm: LLMService,
-        gog: GOGService,
+        gmail: GmailService,
         telegram: TelegramService,
         company: CompanyService = None,
         learning: LearningEngine = None
@@ -37,7 +37,7 @@ class EmailProcessor:
         self.notion = notion
         self.qdrant = qdrant
         self.llm = llm
-        self.gog = gog
+        self.gmail = gmail
         self.telegram = telegram
         self.company = company
         self.learning = learning
@@ -80,7 +80,7 @@ class EmailProcessor:
         try:
             # 1. Fetch email
             logger.info(f"[{email_id}] Buscando email...")
-            raw_email = await self.gog.get_email(email_id, account)
+            raw_email = await self.gmail.get_email(email_id, account)
             
             if not raw_email:
                 result["status"] = "error"
@@ -100,7 +100,7 @@ class EmailProcessor:
             thread_context = []
             if thread_id and thread_id != email_id:
                 logger.info(f"[{email_id}] Buscando contexto da thread {thread_id}...")
-                thread_emails = await self.gog.get_thread(thread_id, account)
+                thread_emails = await self.gmail.get_thread(thread_id, account)
                 if thread_emails:
                     # Pegar últimos emails da thread como contexto
                     thread_context = thread_emails[-3:]  # Últimos 3 emails
@@ -288,7 +288,7 @@ class EmailProcessor:
         email_id = email.get("id", "")
         
         if acao == "arquivar":
-            await self.gog.archive_email(email_id, account)
+            await self.gmail.archive_email(email_id, account)
             logger.info(f"Email {email_id} arquivado")
         
         elif acao == "criar_task":
@@ -298,7 +298,7 @@ class EmailProcessor:
             logger.info(f"Task criada para email {email_id}")
         
         elif acao == "rascunho":
-            draft = await self.gog.create_draft(
+            draft = await self.gmail.create_draft(
                 to=email.get("from", ""),
                 subject=f"Re: {email.get('subject', '')}",
                 body=action.get("rascunho_resposta", ""),

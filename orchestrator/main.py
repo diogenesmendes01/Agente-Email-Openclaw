@@ -59,7 +59,7 @@ MAX_PROCESSED_CACHE = 1000
 from orchestrator.services.notion_service import NotionService
 from orchestrator.services.qdrant_service import QdrantService
 from orchestrator.services.llm_service import LLMService
-from orchestrator.services.gog_service import GOGService
+from orchestrator.services.gmail_service import GmailService
 from orchestrator.services.telegram_service import TelegramService
 from orchestrator.handlers.email_processor import EmailProcessor
 from orchestrator.services.company_service import CompanyService
@@ -69,11 +69,11 @@ from orchestrator.services.learning_engine import LearningEngine
 notion = NotionService()
 qdrant = QdrantService()
 llm = LLMService()
-gog = GOGService()
+gmail = GmailService()
 telegram = TelegramService()
 company = CompanyService()
 learning = LearningEngine(qdrant, telegram)
-processor = EmailProcessor(notion, qdrant, llm, gog, telegram, company, learning)
+processor = EmailProcessor(notion, qdrant, llm, gmail, telegram, company, learning)
 
 
 class GmailWebhookPayload(BaseModel):
@@ -99,7 +99,7 @@ async def health_check():
             "notion": "connected" if notion.is_connected() else "disconnected",
             "qdrant": "connected" if qdrant.is_connected() else "disconnected",
             "llm": "configured" if llm.is_configured() else "not_configured",
-            "gog": "ready" if gog.is_ready() else "not_ready"
+            "gmail": "ready" if gmail.is_ready() else "not_ready"
         }
     )
 
@@ -113,7 +113,7 @@ async def gmail_webhook(
     """
     Webhook para receber notificações de novo email do Gmail
 
-    O GOG gmail watch envia POST com:
+    O Gmail Pub/Sub envia POST com:
     - message.data: base64 encoded pubsub message
     - token: hook token para identificar conta
     """
@@ -172,21 +172,10 @@ async def gmail_webhook(
                     if msg_id and not _is_duplicate(msg_id):
                         await processor.process_email(msg_id, account)
             elif history_id:
-                result = await asyncio.create_subprocess_exec(
-                    "gog", "gmail", "history", "--since", str(history_id),
-                    "--account", account, "--json", "--select=id",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await result.communicate()
-                if result.returncode == 0 and stdout:
-                    history_data = json.loads(stdout.decode("utf-8"))
-                    for msg in history_data.get("messages", []):
-                        msg_id = msg.get("id")
-                        if msg_id and not _is_duplicate(msg_id):
-                            await processor.process_email(msg_id, account)
-                else:
-                    logger.error(f"Erro history: {stderr.decode()}")
+                message_ids = await gmail.get_history(str(history_id), account)
+                for msg_id in message_ids:
+                    if not _is_duplicate(msg_id):
+                        await processor.process_email(msg_id, account)
 
             if email_id and not _is_duplicate(email_id):
                 await processor.process_email(email_id, account)
@@ -266,7 +255,7 @@ async def telegram_callback(request: Request):
 
             # Executar ação real
             if action_type == "archive" and email_id and account:
-                await gog.archive_email(email_id, account)
+                await gmail.archive_email(email_id, account)
             elif action_type == "create_task" and email_id:
                 await notion.create_task({"titulo": f"Email: {email_id}", "prioridade": "Média"}, account)
 
