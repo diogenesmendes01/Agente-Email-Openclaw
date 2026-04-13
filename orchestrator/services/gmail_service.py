@@ -328,6 +328,23 @@ class GmailService:
             logger.error(f"Erro ao mover email {email_id} para {label}: {e}")
             return False
 
+    async def get_attachment(self, email_id: str, attachment_id: str, account: str) -> Optional[bytes]:
+        """Download attachment bytes by ID."""
+        service = self._get_service(account)
+        if not service:
+            return None
+        try:
+            result = await asyncio.to_thread(
+                service.users().messages().attachments().get(
+                    userId="me", messageId=email_id, id=attachment_id
+                ).execute
+            )
+            data = result.get("data", "")
+            return base64.urlsafe_b64decode(data) if data else None
+        except Exception as e:
+            logger.error(f"Error fetching attachment {attachment_id}: {e}")
+            return None
+
     # ============================================================
     # PARSING
     # ============================================================
@@ -373,7 +390,39 @@ class GmailService:
         # Extrair body
         result["body"] = self._extract_body(payload)
 
+        result["attachments"] = self._extract_attachments(payload)
+
         return result
+
+    def _extract_attachments(self, payload: dict) -> list:
+        """Extract attachment metadata from email payload."""
+        attachments = []
+        parts = payload.get("parts", [])
+        for part in parts:
+            filename = part.get("filename", "")
+            body = part.get("body", {})
+            attachment_id = body.get("attachmentId")
+            if filename and attachment_id:
+                attachments.append({
+                    "filename": filename,
+                    "mimeType": part.get("mimeType", ""),
+                    "size": body.get("size", 0),
+                    "attachmentId": attachment_id,
+                })
+            # Check nested parts
+            if part.get("parts"):
+                for nested in part["parts"]:
+                    fn = nested.get("filename", "")
+                    nb = nested.get("body", {})
+                    aid = nb.get("attachmentId")
+                    if fn and aid:
+                        attachments.append({
+                            "filename": fn,
+                            "mimeType": nested.get("mimeType", ""),
+                            "size": nb.get("size", 0),
+                            "attachmentId": aid,
+                        })
+        return attachments
 
     def _extract_body(self, payload: Dict[str, Any]) -> str:
         """Extrai corpo do email (text/plain ou text/html)"""
