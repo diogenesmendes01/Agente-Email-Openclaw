@@ -35,9 +35,11 @@ from vip_manager import (
 )
 
 from orchestrator.services.qdrant_service import QdrantService
+from orchestrator.services.gmail_service import GmailService
 
 # Initialize Qdrant for structured feedback
 _qdrant = QdrantService()
+_gmail = GmailService()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -104,29 +106,6 @@ def save_pending_actions():
     """Salva pending_actions no arquivo (atômico)"""
     _atomic_write_json(PENDING_ACTIONS_FILE, pending_actions)
 
-
-async def run_gog(cmd_args: list, account: str, timeout: float = 30) -> tuple:
-    """Executa GOG de forma assíncrona. Retorna (success: bool, output: str)"""
-    env = os.environ.copy()
-    env["GOG_KEYRING_PASSWORD"] = os.getenv("GOG_KEYRING_PASSWORD", "")
-    env["GOG_ACCOUNT"] = account
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "gog", *cmd_args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        if proc.returncode == 0:
-            return True, stdout.decode("utf-8", errors="replace")
-        else:
-            return False, stderr.decode("utf-8", errors="replace")
-    except asyncio.TimeoutError:
-        proc.kill()
-        return False, "Timeout"
-    except Exception as e:
-        return False, str(e)
 
 
 URGENCY_EMOJIS = {
@@ -386,16 +365,13 @@ async def action_custom_reply_generate(email_id: str, instruction: str, client: 
 async def action_mark_read(email_id: str, account: str, client: httpx.AsyncClient, chat_id: int):
     """✅ Marcar como lido - Arquiva no Gmail"""
     try:
-        success, output = await run_gog(
-            ["gmail", "modify", email_id, "--remove-labels", "INBOX", "UNREAD"],
-            account, timeout=30
-        )
+        success = await _gmail.archive_email(email_id, account)
         if success:
             await send_message(client, chat_id,
                 f"✅ <b>Email marcado como lido</b>\n📧 Arquivado no Gmail")
         else:
             await send_message(client, chat_id,
-                f"⚠️ Erro ao arquivar: {output[:100]}")
+                f"⚠️ Erro ao arquivar email")
     except Exception as e:
         logger.error(f"Erro em mark_read: {e}")
         await send_message(client, chat_id, f"❌ Erro: {str(e)[:100]}")
@@ -461,17 +437,12 @@ async def action_archive(email_id: str, account: str, client: httpx.AsyncClient,
 async def action_spam(email_id: str, account: str, sender: str, client: httpx.AsyncClient, chat_id: int, message_id: int):
     """🚫 Marcar como spam"""
     try:
-        success, output = await run_gog(
-            ["gmail", "modify", email_id,
-             "--remove-labels", "INBOX", "UNREAD",
-             "--add-labels", "SPAM"],
-            account, timeout=30
-        )
+        success = await _gmail.mark_as_spam(email_id, account)
         if success:
             add_to_blacklist(sender, "marcado como spam pelo usuário")
             await mark_message_done(chat_id, message_id, "🚫 Marcado como spam", client, email_id)
         else:
-            await send_message(client, chat_id, f"⚠️ Erro: {output[:100]}")
+            await send_message(client, chat_id, f"⚠️ Erro ao marcar como spam")
     except Exception as e:
         logger.error(f"Erro em spam: {e}")
 
@@ -683,15 +654,15 @@ async def action_send_draft(email_id: str, account: str, client: httpx.AsyncClie
                 f"❌ <b>Erro:</b> Rascunho vazio.")
             return
         
-        # 2. Enviar resposta via GOG (gmail reply)
+        # 2. Enviar resposta via Gmail API
         await send_message(client, chat_id,
             f"✉️ <b>Enviando resposta...</b>\n"
             f"📧 Para: {sender_email}\n"
             f"📝 Comprimento: {len(draft_content)} caracteres")
 
-        success, output = await run_gog(
-            ["gmail", "reply", email_id, "--body", draft_content],
-            account, timeout=60
+        success = await _gmail.send_reply(
+            email_id, draft_content, account,
+            to=sender_email
         )
 
         if success:
@@ -699,7 +670,7 @@ async def action_send_draft(email_id: str, account: str, client: httpx.AsyncClie
             clear_pending_reply(email_id)
         else:
             await send_message(client, chat_id,
-                f"❌ <b>Erro ao enviar resposta:</b>\n{output[:200]}")
+                f"❌ <b>Erro ao enviar resposta</b>")
             
     except Exception as e:
         logger.error(f"Erro em send_draft: {e}")
@@ -1024,17 +995,16 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
             account = state.get("account", os.getenv("GOG_HOOK_ACCOUNT", ""))
             original_email_id = state.get("email_id", "")
             
-            # Enviar via Gmail usando gog gmail reply
+            # Enviar via Gmail API
             try:
-                success, output = await run_gog(
-                    ["gmail", "reply", original_email_id, "--body", last_reply],
-                    account, timeout=60
+                success = await _gmail.send_reply(
+                    original_email_id, last_reply, account
                 )
                 if success:
                     await mark_message_done(chat_id, message_id, "✅ Respondido", client, email_id)
                     clear_pending_reply(email_id)
                 else:
-                    await send_message(client, chat_id, f"❌ Erro ao enviar: {output[:100]}")
+                    await send_message(client, chat_id, f"❌ Erro ao enviar resposta")
             except Exception as e:
                 logger.error(f"Erro ao enviar custom reply: {e}")
                 await send_message(client, chat_id, f"❌ Erro: {str(e)[:100]}")

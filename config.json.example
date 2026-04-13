@@ -1,0 +1,38 @@
+{
+  "notion": {
+    "api_key_env": "NOTION_API_KEY",
+    "databases": {
+      "config": "SEU_DB_CONFIG_ID",
+      "projetos": "SEU_DB_PROJETOS_ID",
+      "tarefas": "SEU_DB_TAREFAS_ID",
+      "decisoes": "SEU_DB_DECISOES_ID"
+    },
+    "page_id": "SEU_PAGE_ID"
+  },
+  "qdrant": {
+    "host": "localhost",
+    "port": 6333,
+    "collections": {
+      "emails": "emails",
+      "threads": "threads",
+      "profiles": "profiles"
+    }
+  },
+  "llm": {
+    "provider": "openrouter",
+    "model": "openrouter/z-ai/glm-5-turbo",
+    "embedding_model": "text-embedding-3-small"
+  },
+  "gmail": {
+    "accounts": {
+      "seu@email.com": {
+        "telegram_topic": null,
+        "hook_token_env": "GOG_HOOK_TOKEN_PESSOAL"
+      }
+    }
+  },
+  "telegram": {
+    "bot_token_env": "TELEGRAM_BOT_TOKEN",
+    "chat_id": "SEU_CHAT_ID"
+  }
+}
