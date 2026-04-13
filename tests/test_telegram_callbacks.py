@@ -86,3 +86,36 @@ async def test_unknown_action_logged():
     cb = _make_callback("unknown_action")
     await handle_callback(cb, services)
     services["telegram"].answer_callback.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_text_message_triggers_custom_reply():
+    """Text message while custom_reply is pending should generate reply."""
+    from orchestrator.handlers.telegram_callbacks import handle_text_message
+    services = _make_services()
+    services["db"].get_pending_by_chat.side_effect = [
+        {"id": 1, "email_id": "em_1", "account_id": 1, "state": '{"original_text": "email body", "account": "u@t.com"}'},
+    ]
+    services["llm"].generate_custom_reply.return_value = "Draft reply"
+    services["db"].update_pending_state.return_value = None
+
+    msg = {"chat": {"id": 100}, "text": "diz que entrego na sexta"}
+    await handle_text_message(msg, services)
+    services["llm"].generate_custom_reply.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_text_message_triggers_task_creation():
+    """Text message while create_task is pending should create task."""
+    from orchestrator.handlers.telegram_callbacks import handle_text_message
+    services = _make_services()
+    services["db"].get_pending_by_chat.side_effect = [
+        None,  # No custom_reply pending
+        {"id": 2, "email_id": "em_2", "account_id": 1,
+         "state": '{"account": "u@t.com", "subject": "Subj", "urgency": "high"}'},
+    ]
+    services["db"].create_task.return_value = 1
+
+    msg = {"chat": {"id": 100}, "text": "Ligar para o cliente"}
+    await handle_text_message(msg, services)
+    services["db"].create_task.assert_called_once()
