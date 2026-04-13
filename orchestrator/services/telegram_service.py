@@ -229,7 +229,7 @@ class TelegramService:
     def _create_keyboard(self, email: Dict[str, Any], action: Dict[str, Any]) -> Dict:
         """Cria teclado inline com todos os botões"""
         email_id = email.get("id", "")
-        account = action.get("account", "diogenes.mendes01@gmail.com")
+        account = action.get("account", os.getenv("GOG_HOOK_ACCOUNT", ""))
         sender = email.get("from_email", "") or email.get("from", "")
         
         # Callback data simplificado: action:email_id:account (sem truncar)
