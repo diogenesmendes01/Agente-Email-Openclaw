@@ -67,6 +67,7 @@ from orchestrator.services.learning_engine import LearningEngine
 from orchestrator.services.metrics_service import MetricsService
 from orchestrator.services.alert_service import AlertService
 from orchestrator.services.job_queue import JobQueue
+from orchestrator.handlers.telegram_callbacks import handle_callback, handle_text_message
 
 # Serviços que não precisam de init async ficam no nível de módulo
 qdrant = QdrantService()
@@ -146,12 +147,34 @@ async def lifespan(app_instance):
     retry_task = asyncio.create_task(retry_worker())
     maint_task = asyncio.create_task(maintenance_worker())
 
-    logger.info("Email Agent v2.0 started — PostgreSQL connected, workers running")
+    async def cleanup_pending_worker():
+        """Clean up expired pending actions every 60 seconds."""
+        while True:
+            try:
+                count = await db.cleanup_expired_actions()
+                if count > 0:
+                    logger.info(f"Cleaned {count} expired pending actions")
+            except Exception as e:
+                logger.error(f"Pending cleanup error: {e}")
+            await asyncio.sleep(60)
+
+    cleanup_task = asyncio.create_task(cleanup_pending_worker())
+
+    logger.info("Email Agent v3.0 started — PostgreSQL connected, workers running")
+
+    # Register Telegram webhook
+    try:
+        webhook_url = f"{_settings.funnel_base_url}/telegram/callback"
+        await telegram.set_webhook(webhook_url, _settings.telegram_webhook_secret)
+    except Exception as e:
+        logger.error(f"Failed to register Telegram webhook: {e}")
+
     yield
 
     # Graceful shutdown
     retry_task.cancel()
     maint_task.cancel()
+    cleanup_task.cancel()
     try:
         await retry_task
     except asyncio.CancelledError:
@@ -160,11 +183,15 @@ async def lifespan(app_instance):
         await maint_task
     except asyncio.CancelledError:
         pass
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
     await pool.close()
     logger.info("Email Agent shutdown — pool closed")
 
 
-app = FastAPI(title="Email Agent", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="Email Agent", version="3.0.0", lifespan=lifespan)
 app.add_middleware(RequestIdMiddleware)
 app.state.limiter = limiter
 
@@ -311,11 +338,7 @@ async def gmail_webhook(
 @app.post("/telegram/callback")
 @limiter.limit("60/minute")
 async def telegram_callback(request: Request):
-    """
-    Endpoint para processar callbacks dos botões inline do Telegram.
-    Validação via secret token header.
-    """
-    # Validar secret token do Telegram
+    """Telegram webhook endpoint — handles callbacks and text messages."""
     expected_secret = os.getenv("TELEGRAM_WEBHOOK_SECRET")
     if expected_secret:
         received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
@@ -324,70 +347,24 @@ async def telegram_callback(request: Request):
 
     try:
         body = await request.json()
-        logger.info(f"Callback recebido: {json.dumps(body)[:500]}")
+        logger.info(f"Telegram update: {json.dumps(body)[:500]}")
+
+        services = {"db": db, "gmail": gmail, "telegram": telegram, "llm": llm}
 
         callback_query = body.get("callback_query")
-        if not callback_query:
-            return JSONResponse(status_code=200, content={"status": "ignored"})
+        if callback_query:
+            await handle_callback(callback_query, services)
+            return JSONResponse(status_code=200, content={"status": "ok"})
 
-        callback_id = callback_query.get("id")
-        callback_data = callback_query.get("data", "")
-        message = callback_query.get("message", {})
-        chat_id = message.get("chat", {}).get("id")
+        message = body.get("message")
+        if message and message.get("text"):
+            await handle_text_message(message, services)
+            return JSONResponse(status_code=200, content={"status": "ok"})
 
-        parts = callback_data.split(":")
-        action_type = parts[0] if parts else "unknown"
-        email_id = parts[1] if len(parts) > 1 else ""
-        account = parts[2] if len(parts) > 2 else ""
-
-        logger.info(f"Callback: {action_type} para email {email_id}")
-
-        action_responses = {
-            "archive": "🗑️ Email arquivado",
-            "create_task": "📋 Task criada",
-            "schedule": "📅 Agendado",
-            "read": "✅ Email lido",
-            "keep": "📍 Email mantido",
-            "cancel": "❌ Cancelado",
-            "send_draft": "✏️ Resposta enviada",
-            "edit_draft": "📝 Editando rascunho..."
-        }
-
-        response_text = action_responses.get(action_type, f"Ação: {action_type}")
-
-        import httpx
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(
-                f"https://api.telegram.org/bot{telegram.bot_token}/answerCallbackQuery",
-                json={"callback_query_id": callback_id, "text": response_text}
-            )
-
-            # Executar ação real
-            if action_type == "archive" and email_id and account:
-                await gmail.archive_email(email_id, account)
-            elif action_type == "create_task" and email_id:
-                if db:
-                    account_data = await db.get_account(account)
-                    if account_data:
-                        await db.create_task(account_data["id"], f"Email: {email_id}", "Média", email_id)
-
-            if chat_id and message.get("message_id"):
-                original_text = message.get("text", "")
-                new_text = f"{original_text}\n\n✅ {response_text}"
-                await client.post(
-                    f"https://api.telegram.org/bot{telegram.bot_token}/editMessageText",
-                    json={
-                        "chat_id": chat_id,
-                        "message_id": message.get("message_id"),
-                        "text": new_text,
-                        "parse_mode": "HTML"
-                    }
-                )
-
-        return JSONResponse(status_code=200, content={"status": "ok"})
+        return JSONResponse(status_code=200, content={"status": "ignored"})
 
     except Exception as e:
-        logger.error(f"Erro no callback: {e}", exc_info=True)
+        logger.error(f"Telegram callback error: {e}", exc_info=True)
         return JSONResponse(status_code=200, content={"status": "error"})
 
 
