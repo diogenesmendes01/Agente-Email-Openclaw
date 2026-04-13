@@ -94,6 +94,8 @@ async def test_text_message_triggers_custom_reply():
     from orchestrator.handlers.telegram_callbacks import handle_text_message
     services = _make_services()
     services["db"].get_pending_by_chat.side_effect = [
+        None,  # No config_identidade pending
+        None,  # No config_playbook pending
         {"id": 1, "email_id": "em_1", "account_id": 1, "state": '{"original_text": "email body", "account": "u@t.com"}'},
     ]
     services["llm"].generate_custom_reply.return_value = "Draft reply"
@@ -110,6 +112,8 @@ async def test_text_message_triggers_task_creation():
     from orchestrator.handlers.telegram_callbacks import handle_text_message
     services = _make_services()
     services["db"].get_pending_by_chat.side_effect = [
+        None,  # No config_identidade pending
+        None,  # No config_playbook pending
         None,  # No custom_reply pending
         {"id": 2, "email_id": "em_2", "account_id": 1,
          "state": '{"account": "u@t.com", "subject": "Subj", "urgency": "high"}'},

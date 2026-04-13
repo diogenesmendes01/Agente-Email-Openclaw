@@ -293,7 +293,7 @@ async def handle_callback(callback_query: dict, services: dict):
 
 
 async def handle_text_message(message: dict, services: dict):
-    """Handle text messages (for custom reply instructions, task details).
+    """Handle text messages (for config commands, custom reply instructions, task details).
 
     Args:
         message: The message object from Telegram update.
@@ -304,6 +304,19 @@ async def handle_text_message(message: dict, services: dict):
     db = services["db"]
     tg = services["telegram"]
     llm = services["llm"]
+
+    # Check if it's a /config command
+    from orchestrator.handlers.telegram_commands import is_command, handle_command, handle_config_response
+    if is_command(text):
+        await handle_command(message, services)
+        return
+
+    # Check for pending config conversation
+    for config_type in ("config_identidade", "config_playbook"):
+        pending = await db.get_pending_by_chat(chat_id, config_type)
+        if pending:
+            await handle_config_response(message, pending, services)
+            return
 
     # Check for pending custom_reply waiting for instruction
     pending = await db.get_pending_by_chat(chat_id, "custom_reply")
