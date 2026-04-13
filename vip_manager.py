@@ -1,9 +1,11 @@
 """
 VIP/Blacklist Manager - Gerencia listas VIP e blacklist de remetentes
+Separado por conta (account) para suporte multi-conta.
 """
 
 import json
 import os
+import tempfile
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List
@@ -26,7 +28,6 @@ def load_json(filepath: str) -> List[Dict]:
 def save_json(filepath: str, data: List[Dict]) -> bool:
     """Salva lista em arquivo JSON (escrita atômica)"""
     try:
-        import tempfile
         dir_path = os.path.dirname(filepath) or "."
         fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
         try:
@@ -42,130 +43,148 @@ def save_json(filepath: str, data: List[Dict]) -> bool:
         return False
 
 
+def _matches_account(entry: Dict, account: str) -> bool:
+    """Verifica se entry pertence à conta. Entries sem account são globais (backward compat)."""
+    entry_account = entry.get("account", "")
+    if not entry_account:
+        return True  # Entry antiga sem account → aceita para qualquer conta
+    return entry_account == account
+
+
 # ============================================================
 # VIP FUNCTIONS
 # ============================================================
 
-def add_vip(email: str, name: Optional[str] = None, min_urgency: str = "high") -> bool:
-    """Adiciona remetente à lista VIP"""
+def add_vip(email: str, name: Optional[str] = None, min_urgency: str = "high", account: str = "") -> bool:
+    """Adiciona remetente à lista VIP (scoped por account)"""
     vip_list = load_json(VIP_FILE)
-    
-    # Verificar se já existe
+
+    # Verificar se já existe para esta conta
     for entry in vip_list:
-        if entry.get("email") == email:
+        if entry.get("email") == email and _matches_account(entry, account):
             return False  # Já é VIP
-    
-    # Adicionar novo VIP
+
     vip_list.append({
         "email": email,
         "name": name or email.split("@")[0],
         "added": datetime.now().strftime("%Y-%m-%d"),
-        "min_urgency": min_urgency
+        "min_urgency": min_urgency,
+        "account": account
     })
-    
+
     return save_json(VIP_FILE, vip_list)
 
 
-def remove_vip(email: str) -> bool:
+def remove_vip(email: str, account: str = "") -> bool:
     """Remove remetente da lista VIP"""
     vip_list = load_json(VIP_FILE)
-    
-    # Filtrar para remover
-    new_list = [entry for entry in vip_list if entry.get("email") != email]
-    
+
+    new_list = [
+        entry for entry in vip_list
+        if not (entry.get("email") == email and _matches_account(entry, account))
+    ]
+
     if len(new_list) == len(vip_list):
-        return False  # Não estava na lista
-    
+        return False
+
     return save_json(VIP_FILE, new_list)
 
 
-def is_vip(email: str) -> bool:
-    """Verifica se remetente é VIP"""
+def is_vip(email: str, account: str = "") -> bool:
+    """Verifica se remetente é VIP para esta conta"""
     vip_list = load_json(VIP_FILE)
-    
+
     for entry in vip_list:
-        if entry.get("email") == email:
+        if entry.get("email") == email and _matches_account(entry, account):
             return True
-    
+
     return False
 
 
-def get_min_urgency(email: str) -> Optional[str]:
+def get_min_urgency(email: str, account: str = "") -> Optional[str]:
     """Retorna urgência mínima para VIP (null se não é VIP)"""
     vip_list = load_json(VIP_FILE)
-    
+
     for entry in vip_list:
-        if entry.get("email") == email:
+        if entry.get("email") == email and _matches_account(entry, account):
             return entry.get("min_urgency", "high")
-    
+
     return None
 
 
-def get_all_vips() -> List[Dict]:
-    """Retorna lista completa de VIPs"""
-    return load_json(VIP_FILE)
+def get_all_vips(account: str = "") -> List[Dict]:
+    """Retorna lista de VIPs para esta conta"""
+    vip_list = load_json(VIP_FILE)
+    if not account:
+        return vip_list
+    return [entry for entry in vip_list if _matches_account(entry, account)]
 
 
 # ============================================================
 # BLACKLIST FUNCTIONS
 # ============================================================
 
-def add_to_blacklist(email: str, reason: Optional[str] = None) -> bool:
-    """Adiciona remetente à blacklist"""
+def add_to_blacklist(email: str, reason: Optional[str] = None, account: str = "") -> bool:
+    """Adiciona remetente à blacklist (scoped por account)"""
     blacklist = load_json(BLACKLIST_FILE)
-    
-    # Verificar se já existe
+
     for entry in blacklist:
-        if entry.get("email") == email:
+        if entry.get("email") == email and _matches_account(entry, account):
             return False  # Já está na blacklist
-    
-    # Adicionar
+
     blacklist.append({
         "email": email,
         "reason": reason or "silenciado pelo usuário",
-        "added": datetime.now().strftime("%Y-%m-%d")
+        "added": datetime.now().strftime("%Y-%m-%d"),
+        "account": account
     })
-    
+
     return save_json(BLACKLIST_FILE, blacklist)
 
 
-def remove_from_blacklist(email: str) -> bool:
+def remove_from_blacklist(email: str, account: str = "") -> bool:
     """Remove remetente da blacklist"""
     blacklist = load_json(BLACKLIST_FILE)
-    
-    new_list = [entry for entry in blacklist if entry.get("email") != email]
-    
+
+    new_list = [
+        entry for entry in blacklist
+        if not (entry.get("email") == email and _matches_account(entry, account))
+    ]
+
     if len(new_list) == len(blacklist):
-        return False  # Não estava na lista
-    
+        return False
+
     return save_json(BLACKLIST_FILE, new_list)
 
 
-def is_blacklisted(email: str) -> bool:
-    """Verifica se remetente está na blacklist"""
+def is_blacklisted(email: str, account: str = "") -> bool:
+    """Verifica se remetente está na blacklist para esta conta"""
     blacklist = load_json(BLACKLIST_FILE)
-    
+
     for entry in blacklist:
-        if entry.get("email") == email:
+        if entry.get("email") == email and _matches_account(entry, account):
             return True
-    
+
     return False
 
 
-def get_blacklist_reason(email: str) -> Optional[str]:
+def get_blacklist_reason(email: str, account: str = "") -> Optional[str]:
     """Retorna motivo da blacklist"""
     blacklist = load_json(BLACKLIST_FILE)
-    
+
     for entry in blacklist:
-        if entry.get("email") == email:
+        if entry.get("email") == email and _matches_account(entry, account):
             return entry.get("reason")
-    
+
     return None
 
 
-def get_all_blacklisted() -> List[Dict]:
-    """Retorna lista completa de blacklist"""
-    return load_json(BLACKLIST_FILE)
+def get_all_blacklisted(account: str = "") -> List[Dict]:
+    """Retorna lista completa de blacklist para esta conta"""
+    blacklist = load_json(BLACKLIST_FILE)
+    if not account:
+        return blacklist
+    return [entry for entry in blacklist if _matches_account(entry, account)]
 
 
 # ============================================================
@@ -174,35 +193,27 @@ def get_all_blacklisted() -> List[Dict]:
 
 if __name__ == "__main__":
     print("=== Teste VIP/Blacklist Manager ===")
-    
-    # Testar VIP
+
+    test_account = "teste@gmail.com"
+
     print("\n1. Adicionar VIP...")
-    result = add_vip("relacionamento@pagar.me", "Pagar.me Atendimento")
+    result = add_vip("relacionamento@pagar.me", "Pagar.me Atendimento", account=test_account)
     print(f"   Resultado: {result}")
-    
-    print("\n2. Verificar VIP...")
-    is_vip_result = is_vip("relacionamento@pagar.me")
-    print(f"   é VIP: {is_vip_result}")
-    
-    print("\n3. Urgência mínima...")
-    min_urg = get_min_urgency("relacionamento@pagar.me")
-    print(f"   min_urgency: {min_urg}")
-    
-    # Testar Blacklist
+
+    print("\n2. Verificar VIP (mesma conta)...")
+    print(f"   é VIP: {is_vip('relacionamento@pagar.me', account=test_account)}")
+
+    print("\n3. Verificar VIP (outra conta)...")
+    print(f"   é VIP: {is_vip('relacionamento@pagar.me', account='outra@gmail.com')}")
+
     print("\n4. Adicionar Blacklist...")
-    result = add_to_blacklist("newsletter@spam.com", "newsletter chata")
+    result = add_to_blacklist("newsletter@spam.com", "newsletter chata", account=test_account)
     print(f"   Resultado: {result}")
-    
+
     print("\n5. Verificar Blacklist...")
-    is_blacklisted_result = is_blacklisted("newsletter@spam.com")
-    print(f"   está blacklist: {is_blacklisted_result}")
-    
-    print("\n6. Listar VIPs...")
-    vips = get_all_vips()
-    print(f"   VIPs: {vips}")
-    
-    print("\n7. Listar Blacklist...")
-    blacklist = get_all_blacklisted()
-    print(f"   Blacklist: {blacklist}")
-    
+    print(f"   blacklisted: {is_blacklisted('newsletter@spam.com', account=test_account)}")
+
+    print("\n6. Listar VIPs da conta...")
+    print(f"   VIPs: {get_all_vips(account=test_account)}")
+
     print("\n✅ Testes concluídos!")

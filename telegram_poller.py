@@ -179,7 +179,7 @@ async def edit_message_text(client: httpx.AsyncClient, chat_id: int, message_id:
     except Exception as e:
         logger.error(f"Erro ao editar mensagem: {e}")
 
-async def save_feedback(email_id: str, sender: str, original_urgency: str, corrected_urgency: str, keywords: list):
+async def save_feedback(email_id: str, sender: str, original_urgency: str, corrected_urgency: str, keywords: list, account: str = ""):
     """Salva feedback de reclassificação em feedback.json (backup) e Qdrant (primário)"""
     try:
         # Backup: feedback.json
@@ -190,7 +190,8 @@ async def save_feedback(email_id: str, sender: str, original_urgency: str, corre
             "original_urgency": original_urgency,
             "corrected_urgency": corrected_urgency,
             "date": datetime.now().strftime("%Y-%m-%d"),
-            "keywords": keywords
+            "keywords": keywords,
+            "account": account
         })
         _atomic_write_json(FEEDBACK_FILE, feedback_data)
 
@@ -439,18 +440,18 @@ async def action_spam(email_id: str, account: str, sender: str, client: httpx.As
     try:
         success = await _gmail.mark_as_spam(email_id, account)
         if success:
-            add_to_blacklist(sender, "marcado como spam pelo usuário")
+            add_to_blacklist(sender, "marcado como spam pelo usuário", account=account)
             await mark_message_done(chat_id, message_id, "🚫 Marcado como spam", client, email_id)
         else:
             await send_message(client, chat_id, f"⚠️ Erro ao marcar como spam")
     except Exception as e:
         logger.error(f"Erro em spam: {e}")
 
-async def action_vip(sender: str, client: httpx.AsyncClient, chat_id: int):
+async def action_vip(sender: str, client: httpx.AsyncClient, chat_id: int, account: str = ""):
     """⭐ Adicionar remetente como VIP"""
     try:
-        # Adicionar à lista VIP
-        result = add_vip(sender, sender.split('@')[0] if '@' in sender else sender)
+        # Adicionar à lista VIP (scoped por account)
+        result = add_vip(sender, sender.split('@')[0] if '@' in sender else sender, account=account)
         
         if result:
             await send_message(client, chat_id,
@@ -463,11 +464,11 @@ async def action_vip(sender: str, client: httpx.AsyncClient, chat_id: int):
     except Exception as e:
         logger.error(f"Erro em vip: {e}")
 
-async def action_silence(sender: str, client: httpx.AsyncClient, chat_id: int):
+async def action_silence(sender: str, client: httpx.AsyncClient, chat_id: int, account: str = ""):
     """🔇 Silenciar remetente"""
     try:
-        # Adicionar à blacklist
-        result = add_to_blacklist(sender, "silenciado pelo usuário")
+        # Adicionar à blacklist (scoped por account)
+        result = add_to_blacklist(sender, "silenciado pelo usuário", account=account)
         
         if result:
             await send_message(client, chat_id,
@@ -547,9 +548,10 @@ async def action_reclassify_complete(email_id: str, new_urgency: str, client: ht
     original_urgency = state["original_urgency"]
     keywords = state["keywords"]
     original_text = state["original_text"]
-    
-    # 1. Salvar feedback
-    await save_feedback(email_id, sender, original_urgency, new_urgency, keywords)
+    account = state.get("account", "")
+
+    # 1. Salvar feedback (scoped por account)
+    await save_feedback(email_id, sender, original_urgency, new_urgency, keywords, account=account)
     
     # 2. Editar texto da mensagem - trocar header de urgência
     lines = original_text.split("\n")
@@ -902,7 +904,7 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
     # CONFIRMAR SILENCE
     if action == "confirm_silence":
         await answer_callback(client, callback_id, "🔇 Silenciando...")
-        await action_silence(sender, client, chat_id)
+        await action_silence(sender, client, chat_id, account=account)
         # Marcar mensagem como feita
         if email_id in pending_actions:
             state = pending_actions[email_id]
@@ -1102,7 +1104,7 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
         "read": ("✅ Marcando como lido...", lambda: action_mark_read(email_id, account, client, chat_id)),
         "archive": ("🗑️ Arquivando...", lambda: action_archive(email_id, account, client, chat_id)),
         "create_task": ("📋 Criando tarefa...", lambda: action_create_task(email_id, subject, extract_urgency_from_message(text), client, chat_id)),
-        "vip": ("⭐ Adicionando VIP...", lambda: action_vip(sender, client, chat_id)),
+        "vip": ("⭐ Adicionando VIP...", lambda: action_vip(sender, client, chat_id, account=account)),
         "reclassify": ("🔄 Reclassificando...", lambda: action_reclassify_start(email_id, message, client)),
     }
     
