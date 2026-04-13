@@ -6,7 +6,10 @@ from orchestrator.security import (
     constant_time_equals,
     extract_bearer_token,
     is_telegram_actor_allowed,
+    is_valid_account,
+    is_valid_email_id,
     parse_int_set,
+    truncate_identifier,
 )
 
 
@@ -66,3 +69,22 @@ class TestSecretHelpers:
     def test_extracts_bearer_token(self):
         assert extract_bearer_token("Bearer test-token") == "test-token"
         assert extract_bearer_token("Basic abc") == ""
+
+
+class TestIdentifierValidation:
+    def test_accepts_expected_email_ids(self):
+        assert is_valid_email_id("18c28f9aBC_-1234") is True
+
+    def test_rejects_malformed_email_ids(self):
+        assert is_valid_email_id("../etc/passwd") is False
+        assert is_valid_email_id("short") is False
+
+    def test_accepts_valid_accounts(self):
+        assert is_valid_account("user@example.com") is True
+
+    def test_rejects_invalid_accounts(self):
+        assert is_valid_account("not-an-email") is False
+        assert is_valid_account("user @example.com") is False
+
+    def test_truncates_identifiers_for_logs(self):
+        assert truncate_identifier("1234567890abcdef") == "12345678..."

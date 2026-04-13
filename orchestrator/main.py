@@ -6,6 +6,7 @@ FastAPI app que recebe webhooks do Gmail e processa emails
 import os
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Optional
 from collections import OrderedDict
@@ -46,6 +47,28 @@ limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Email Agent", version="1.0.0")
 app.state.limiter = limiter
 
+ALLOWED_CALLBACK_ACTIONS = {
+    "archive",
+    "create_task",
+    "schedule",
+    "read",
+    "keep",
+    "cancel",
+    "send_draft",
+    "edit_draft",
+}
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """Apply a baseline set of browser-facing security headers."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
 
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
@@ -68,6 +91,9 @@ from orchestrator.security import (
     constant_time_equals,
     extract_bearer_token,
     is_telegram_actor_allowed,
+    is_valid_account,
+    is_valid_email_id,
+    truncate_identifier,
 )
 
 # Inicializar serviços
@@ -162,7 +188,19 @@ async def gmail_webhook(
         if not email_id and not history_id:
             raise HTTPException(status_code=400, detail="Nenhum identificador encontrado (emailId ou historyId)")
 
-        logger.info(f"Processando - email_id: {email_id}, history_id: {history_id}, conta: {account}")
+        if email_id and not is_valid_email_id(email_id):
+            raise HTTPException(status_code=400, detail="emailId invÃ¡lido")
+        if history_id and not re.fullmatch(r"[A-Za-z0-9_-]{4,128}", str(history_id)):
+            raise HTTPException(status_code=400, detail="historyId invÃ¡lido")
+        if not is_valid_account(account):
+            raise HTTPException(status_code=400, detail="Conta invÃ¡lida")
+
+        logger.info(
+            "Processando webhook Gmail - email_id=%s history_id=%s conta=%s",
+            truncate_identifier(email_id),
+            truncate_identifier(str(history_id) if history_id else ""),
+            account,
+        )
 
         # Processar em background
         async def process_with_history():
@@ -199,9 +237,11 @@ async def gmail_webhook(
 
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="JSON inválido")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Erro no webhook: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Erro interno no processamento")
 
 
 @app.post("/telegram/callback")
@@ -249,7 +289,16 @@ async def telegram_callback(request: Request):
         email_id = parts[1] if len(parts) > 1 else ""
         account = parts[2] if len(parts) > 2 else ""
 
-        logger.info(f"Callback: {action_type} para email {email_id}")
+        if action_type not in ALLOWED_CALLBACK_ACTIONS:
+            raise HTTPException(status_code=400, detail="AÃ§Ã£o invÃ¡lida")
+
+        if action_type != "cancel":
+            if not is_valid_email_id(email_id):
+                raise HTTPException(status_code=400, detail="emailId invÃ¡lido")
+            if not is_valid_account(account):
+                raise HTTPException(status_code=400, detail="Conta invÃ¡lida")
+
+        logger.info("Callback Telegram: action=%s email=%s", action_type, truncate_identifier(email_id))
 
         action_responses = {
             "archive": "🗑️ Email arquivado",
@@ -292,12 +341,15 @@ async def telegram_callback(request: Request):
 
         return JSONResponse(status_code=200, content={"status": "ok"})
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Erro no callback: {e}", exc_info=True)
         return JSONResponse(status_code=200, content={"status": "error"})
 
 
 @app.post("/hooks/gmail/test")
+@limiter.limit("5/minute")
 async def test_webhook(request: Request):
     """Endpoint para testar o webhook manualmente"""
     expected_token = os.getenv("EMAIL_AGENT_TEST_WEBHOOK_TOKEN", "").strip()
@@ -318,7 +370,12 @@ async def test_webhook(request: Request):
     if not email_id or not account:
         raise HTTPException(status_code=400, detail="emailId e account são obrigatórios")
 
-    logger.info(f"TESTE: Processando email {email_id}")
+    if not is_valid_email_id(email_id):
+        raise HTTPException(status_code=400, detail="emailId invÃ¡lido")
+    if not is_valid_account(account):
+        raise HTTPException(status_code=400, detail="account invÃ¡lido")
+
+    logger.info("TESTE: Processando email %s", truncate_identifier(email_id))
     result = await processor.process_email(email_id, account)
     return JSONResponse(content=result)
 
@@ -327,7 +384,7 @@ def _is_duplicate(email_id: str) -> bool:
     """Verifica se email já foi processado (deduplicação LRU in-memory)"""
     if email_id in _processed_emails:
         _processed_emails.move_to_end(email_id)
-        logger.info(f"Email {email_id} já processado, pulando (dedup)")
+        logger.info("Email %s jÃ¡ processado, pulando (dedup)", truncate_identifier(email_id))
         return True
     _processed_emails[email_id] = True
     # Evictar os mais antigos quando exceder o limite
