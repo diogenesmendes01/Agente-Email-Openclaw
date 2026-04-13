@@ -29,10 +29,95 @@ elif (BASE_DIR / ".env").exists():
 
 # Adicionar path para imports
 sys.path.insert(0, str(BASE_DIR))
-from vip_manager import (
-    add_vip, is_vip, get_min_urgency, get_all_vips,
-    add_to_blacklist, is_blacklisted, get_blacklist_reason
-)
+
+# TODO (Phase 3): replace these stubs with async DatabaseService calls once
+# telegram_poller is migrated into the orchestrator container with DB access.
+# vip_manager.py has been removed — functions below are temporary file-based stubs
+# that replicate the old behaviour until the full Phase 3 migration is complete.
+import json as _json
+import tempfile as _tempfile
+
+_VIP_FILE = str(BASE_DIR / "vip-list.json")
+_BLACKLIST_FILE = str(BASE_DIR / "blacklist.json")
+
+
+def _load_json(path):
+    try:
+        with open(path) as f:
+            return _json.load(f)
+    except (FileNotFoundError, _json.JSONDecodeError):
+        return []
+
+
+def _save_json(path, data):
+    try:
+        import os as _os
+        dir_path = _os.path.dirname(path) or "."
+        fd, tmp = _tempfile.mkstemp(dir=dir_path, suffix=".tmp")
+        with _os.fdopen(fd, "w") as f:
+            _json.dump(data, f, indent=2)
+        _os.replace(tmp, path)
+        return True
+    except Exception as e:
+        logger.error(f"_save_json error: {e}")
+        return False
+
+
+def _matches_account(entry, account):
+    ea = entry.get("account", "")
+    return (not ea) or ea == account
+
+
+def add_vip(email, name=None, min_urgency="high", account=""):
+    data = _load_json(_VIP_FILE)
+    for e in data:
+        if e.get("email") == email and _matches_account(e, account):
+            return False
+    from datetime import datetime
+    data.append({"email": email, "name": name or email.split("@")[0],
+                 "added": datetime.now().strftime("%Y-%m-%d"),
+                 "min_urgency": min_urgency, "account": account})
+    return _save_json(_VIP_FILE, data)
+
+
+def is_vip(email, account=""):
+    return any(e.get("email") == email and _matches_account(e, account)
+               for e in _load_json(_VIP_FILE))
+
+
+def get_min_urgency(email, account=""):
+    for e in _load_json(_VIP_FILE):
+        if e.get("email") == email and _matches_account(e, account):
+            return e.get("min_urgency", "high")
+    return None
+
+
+def get_all_vips(account=""):
+    data = _load_json(_VIP_FILE)
+    return [e for e in data if _matches_account(e, account)] if account else data
+
+
+def add_to_blacklist(email, reason=None, account=""):
+    data = _load_json(_BLACKLIST_FILE)
+    for e in data:
+        if e.get("email") == email and _matches_account(e, account):
+            return False
+    from datetime import datetime
+    data.append({"email": email, "reason": reason or "silenciado pelo usuário",
+                 "added": datetime.now().strftime("%Y-%m-%d"), "account": account})
+    return _save_json(_BLACKLIST_FILE, data)
+
+
+def is_blacklisted(email, account=""):
+    return any(e.get("email") == email and _matches_account(e, account)
+               for e in _load_json(_BLACKLIST_FILE))
+
+
+def get_blacklist_reason(email, account=""):
+    for e in _load_json(_BLACKLIST_FILE):
+        if e.get("email") == email and _matches_account(e, account):
+            return e.get("reason")
+    return None
 
 from orchestrator.services.qdrant_service import QdrantService
 from orchestrator.services.gmail_service import GmailService
