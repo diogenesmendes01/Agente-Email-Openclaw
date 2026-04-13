@@ -1,0 +1,99 @@
+import pytest
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+
+@pytest.fixture
+def mock_pool():
+    pool = MagicMock()
+    conn = AsyncMock()
+    # pool.acquire() returns an async context manager directly
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=conn)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    pool.acquire.return_value = ctx
+    return pool, conn
+
+
+class TestDatabaseService:
+
+    @pytest.mark.asyncio
+    async def test_get_account_returns_dict(self, mock_pool):
+        pool, conn = mock_pool
+        conn.fetchrow.return_value = {
+            "id": 1, "email": "test@gmail.com",
+            "hook_token_env": "TOKEN", "telegram_topic_id": 123,
+            "learning_counter": 0,
+        }
+        from orchestrator.services.database_service import DatabaseService
+        db = DatabaseService(pool)
+        result = await db.get_account("test@gmail.com")
+        assert result["id"] == 1
+        assert result["email"] == "test@gmail.com"
+
+    @pytest.mark.asyncio
+    async def test_get_account_returns_none_if_missing(self, mock_pool):
+        pool, conn = mock_pool
+        conn.fetchrow.return_value = None
+        from orchestrator.services.database_service import DatabaseService
+        db = DatabaseService(pool)
+        result = await db.get_account("missing@gmail.com")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_is_blacklisted_true(self, mock_pool):
+        pool, conn = mock_pool
+        conn.fetchval.return_value = True
+        from orchestrator.services.database_service import DatabaseService
+        db = DatabaseService(pool)
+        result = await db.is_blacklisted(1, "spam@domain.com")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_is_blacklisted_false(self, mock_pool):
+        pool, conn = mock_pool
+        conn.fetchval.return_value = False
+        from orchestrator.services.database_service import DatabaseService
+        db = DatabaseService(pool)
+        result = await db.is_blacklisted(1, "friend@domain.com")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_add_vip(self, mock_pool):
+        pool, conn = mock_pool
+        conn.execute.return_value = "INSERT 0 1"
+        from orchestrator.services.database_service import DatabaseService
+        db = DatabaseService(pool)
+        result = await db.add_vip(1, "vip@domain.com", "VIP Person", "high")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_log_decision(self, mock_pool):
+        pool, conn = mock_pool
+        conn.fetchval.return_value = 42
+        from orchestrator.services.database_service import DatabaseService
+        db = DatabaseService(pool)
+        result = await db.log_decision({
+            "account_id": 1, "email_id": "abc123",
+            "subject": "Test", "from": "sender@test.com",
+            "classificacao": "trabalho", "prioridade": "Alta",
+            "categoria": "trabalho", "acao": "notificar",
+            "resumo": "Test email", "reasoning_tokens": 100,
+        })
+        assert result == 42
+
+    @pytest.mark.asyncio
+    async def test_get_account_config(self, mock_pool):
+        pool, conn = mock_pool
+        conn.fetchrow.return_value = {
+            "id": 1, "email": "t@g.com", "hook_token_env": "T",
+            "telegram_topic_id": 5, "learning_counter": 0,
+        }
+        conn.fetch.side_effect = [
+            [{"sender_email": "vip@test.com"}],  # VIPs
+        ]
+        from orchestrator.services.database_service import DatabaseService
+        db = DatabaseService(pool)
+        config = await db.get_account_config("t@g.com")
+        assert "vips" in config
+        assert config["telegram_topic"] == 5
