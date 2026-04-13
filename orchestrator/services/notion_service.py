@@ -25,14 +25,17 @@ class NotionService:
         self._connected = False
 
         # Database IDs do config.json (carregados via env ou hardcoded como fallback)
-        self.db_config = os.getenv("NOTION_DB_CONFIG", "33d2b64f-5143-811a-93c9-eb5bb474c102")
-        self.db_projetos = os.getenv("NOTION_DB_PROJETOS", "33d2b64f-5143-8107-8d89-da96277a6635")
-        self.db_tarefas = os.getenv("NOTION_DB_TAREFAS", "33d2b64f-5143-81b5-803d-d042dbb50525")
-        self.db_decisoes = os.getenv("NOTION_DB_DECISOES", "33d2b64f-5143-8139-85d4-dfd46d674216")
+        self.db_config = os.getenv("NOTION_DB_CONFIG", "")
+        self.db_projetos = os.getenv("NOTION_DB_PROJETOS", "")
+        self.db_tarefas = os.getenv("NOTION_DB_TAREFAS", "")
+        self.db_decisoes = os.getenv("NOTION_DB_DECISOES", "")
 
-        if self.api_key:
+        if self.api_key and self.db_config:
             self._connected = True
             logger.info("NotionService inicializado com sucesso")
+        else:
+            if self.api_key and not self.db_config:
+                logger.warning("NotionService: NOTION_DB_CONFIG não configurado")
 
     def is_connected(self) -> bool:
         return self._connected

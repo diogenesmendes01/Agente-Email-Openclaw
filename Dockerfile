@@ -18,7 +18,7 @@ COPY vip_manager.py .
 COPY config.json .
 
 # Criar arquivos de estado se não existirem
-RUN touch vip-list.json blacklist.json feedback.json pending_actions.json pending_replies.json
+RUN echo '[]' > vip-list.json && echo '[]' > blacklist.json && echo '[]' > feedback.json && echo '{}' > pending_actions.json && echo '{}' > pending_replies.json
 
 ENV PYTHONPATH=/app
 ENV EMAIL_AGENT_BASE_DIR=/app

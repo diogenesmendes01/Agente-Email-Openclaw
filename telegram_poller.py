@@ -15,6 +15,7 @@ from pathlib import Path
 from datetime import datetime
 import sys
 
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from dotenv import load_dotenv
 
 # Determinar diretório base
@@ -49,7 +50,7 @@ API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # Configurações
 NOTION_API_KEY = os.getenv("NOTION_API_KEY", "")
-NOTION_DB_TAREFAS = os.getenv("NOTION_DB_TAREFAS", "33d2b64f-5143-81b5-803d-d042dbb50525")
+NOTION_DB_TAREFAS = os.getenv("NOTION_DB_TAREFAS", "")
 
 # Estado temporário
 pending_actions = {}
@@ -255,24 +256,37 @@ def extract_keywords_from_message(text: str) -> list:
 # FUNÇÕES PARA RESPONDER CUSTOM
 # ============================================================
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=30),
+    retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
+    reraise=True
+)
+async def _call_openrouter_reply(email_content: str, instruction: str) -> str:
+    """Chama OpenRouter com retry para gerar resposta customizada"""
+    async with httpx.AsyncClient(timeout=60.0) as llm_client:
+        response = await llm_client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+            json={
+                "model": os.getenv("LLM_MODEL", "z-ai/glm-5-turbo"),
+                "messages": [
+                    {"role": "system", "content": "Escreva respostas de email profissionais em português. Seja direto e formal. Assine como 'Att, Diógenes Mendes'"},
+                    {"role": "user", "content": f"Email recebido:\n{email_content[:2000]}\n\nInstrução do usuário: {instruction}\n\nEscreva a resposta:"}
+                ],
+                "max_tokens": 800
+            }
+        )
+        if response.status_code == 429:
+            raise httpx.TimeoutException("Rate limited")
+        data = response.json()
+        return data["choices"][0]["message"]["content"]
+
+
 async def generate_custom_reply(email_content: str, instruction: str) -> str:
-    """Gera resposta customizada via GLM-5 Turbo"""
+    """Gera resposta customizada via LLM com retry"""
     try:
-        async with httpx.AsyncClient(timeout=60.0) as llm_client:
-            response = await llm_client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
-                json={
-                    "model": "z-ai/glm-5-turbo",
-                    "messages": [
-                        {"role": "system", "content": "Escreva respostas de email profissionais em português. Seja direto e formal. Assine como 'Att, Diógenes Mendes'"},
-                        {"role": "user", "content": f"Email recebido:\n{email_content[:2000]}\n\nInstrução do usuário: {instruction}\n\nEscreva a resposta:"}
-                    ],
-                    "max_tokens": 800
-                }
-            )
-            data = response.json()
-            return data["choices"][0]["message"]["content"]
+        return await _call_openrouter_reply(email_content, instruction)
     except Exception as e:
         logger.error(f"Erro ao gerar resposta: {e}")
         return None
@@ -1007,7 +1021,7 @@ async def process_callback(callback: dict, client: httpx.AsyncClient):
             message_id = state.get("message_id")
             sender = state.get("sender", "")
             last_reply = state["last_reply"]
-            account = state.get("account", "diogenes.mendes01@gmail.com")
+            account = state.get("account", os.getenv("GOG_HOOK_ACCOUNT", ""))
             original_email_id = state.get("email_id", "")
             
             # Enviar via Gmail usando gog gmail reply
