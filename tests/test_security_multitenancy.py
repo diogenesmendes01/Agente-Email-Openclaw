@@ -134,3 +134,52 @@ async def test_confirm_action_isolated_by_actor():
     }
     await handle_callback(callback, services)
     services["db"].get_pending_action.assert_called_once_with("email1", "archive", actor_id=42)
+
+
+# ── Topic-scoped pending actions ──
+
+
+@pytest.mark.asyncio
+async def test_pending_by_chat_passes_topic_id():
+    """get_pending_by_chat should receive topic_id when message has message_thread_id."""
+    from orchestrator.handlers.telegram_callbacks import handle_text_message
+    services = _make_services(allowed_user_ids={42})
+    services["db"].get_pending_by_chat.return_value = None
+    msg = {"chat": {"id": 100}, "message_thread_id": 555, "from": {"id": 42}, "text": "test"}
+    await handle_text_message(msg, services)
+    calls = services["db"].get_pending_by_chat.call_args_list
+    for call in calls:
+        assert call.kwargs.get("topic_id") == 555
+
+
+# ── send_text thread routing ──
+
+
+@pytest.mark.asyncio
+async def test_command_sends_to_correct_topic():
+    """Commands in topic groups should send replies to the same topic."""
+    from orchestrator.handlers.telegram_commands import handle_command
+    services = _make_services()
+    services["db"].get_account_by_topic.return_value = {"id": 1}
+    msg = {
+        "chat": {"id": 100},
+        "message_thread_id": 555,
+        "from": {"id": 42},
+        "text": "/config_identidade",
+    }
+    await handle_command(msg, services)
+    call_kwargs = services["telegram"].send_text.call_args
+    assert call_kwargs.kwargs.get("thread_id") == 555 or call_kwargs[1].get("thread_id") == 555
+
+
+@pytest.mark.asyncio
+async def test_command_no_thread_id_in_private_chat():
+    """In a private chat (no message_thread_id), thread_id should be None."""
+    from orchestrator.handlers.telegram_commands import handle_command
+    services = _make_services()
+    services["db"].get_account_by_topic.return_value = {"id": 1}
+    msg = {"chat": {"id": 100}, "from": {"id": 42}, "text": "/config_identidade"}
+    await handle_command(msg, services)
+    call_kwargs = services["telegram"].send_text.call_args
+    thread_id = call_kwargs.kwargs.get("thread_id") if call_kwargs.kwargs else call_kwargs[1].get("thread_id", None) if len(call_kwargs) > 1 else None
+    assert thread_id is None

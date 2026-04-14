@@ -16,6 +16,7 @@ async def start_reply(ctx: dict) -> bool:
         await ctx["db"].create_pending_action(
             ctx.get("account_id"), ctx["email_id"], "custom_reply",
             ctx["actor_id"], ctx["chat_id"], ctx["message_id"], state,
+            topic_id=ctx.get("topic_id"),
         )
         keyboard = {
             "inline_keyboard": [[
@@ -30,6 +31,7 @@ async def start_reply(ctx: dict) -> bool:
             "• pede pra remarcar\n"
             "• aceita mas pede desconto",
             reply_markup=keyboard,
+            thread_id=ctx.get("topic_id"),
         )
         return True
     except Exception as e:
@@ -62,6 +64,7 @@ async def generate_reply(ctx: dict) -> str:
             ctx["chat_id"],
             f"💬 <b>RASCUNHO:</b>\n{draft[:500]}",
             reply_markup=keyboard,
+            thread_id=ctx.get("topic_id"),
         )
         return draft
     except Exception as e:

@@ -61,6 +61,7 @@ async def start_reclassify(ctx: dict) -> bool:
         await ctx["db"].create_pending_action(
             ctx.get("account_id"), ctx["email_id"], "reclassify",
             ctx["actor_id"], ctx["chat_id"], ctx["message_id"], state,
+            topic_id=ctx.get("topic_id"),
         )
         keyboard = _urgency_keyboard(ctx["email_id"])
         await ctx["telegram"].edit_reply_markup(ctx["chat_id"], ctx["message_id"], keyboard)

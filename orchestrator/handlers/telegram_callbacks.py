@@ -107,6 +107,7 @@ async def handle_callback(callback_query: dict, services: dict):
     actor_id = callback_query.get("from", {}).get("id", 0)
     message = callback_query.get("message", {})
     chat_id = message.get("chat", {}).get("id")
+    topic_id = message.get("message_thread_id")
     message_id = message.get("message_id")
     text = message.get("text", "")
 
@@ -132,7 +133,7 @@ async def handle_callback(callback_query: dict, services: dict):
         await tg.answer_callback(callback_id, f"✅ {new_urgency.upper()}")
         pending = await db.get_pending_action(email_id, "reclassify", actor_id=actor_id)
         if pending:
-            ctx = _build_ctx(email_id, "", actor_id, chat_id, message_id, text, services, pending=pending)
+            ctx = _build_ctx(email_id, "", actor_id, chat_id, message_id, text, services, pending=pending, topic_id=topic_id)
             ctx["new_urgency"] = new_urgency
             status = await feedback.complete_reclassify(ctx)
             state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
@@ -168,7 +169,7 @@ async def handle_callback(callback_query: dict, services: dict):
         await tg.answer_callback(callback_id, "✉️ Enviando...")
         pending = await db.get_pending_action(email_id, "custom_reply", actor_id=actor_id)
         if pending:
-            ctx = _build_ctx(email_id, "", actor_id, chat_id, message_id, text, services, pending=pending)
+            ctx = _build_ctx(email_id, "", actor_id, chat_id, message_id, text, services, pending=pending, topic_id=topic_id)
             status = await reply.send_draft(ctx)
             state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
             original_text = state.get("original_text", text)
@@ -184,7 +185,7 @@ async def handle_callback(callback_query: dict, services: dict):
             state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
             state["waiting_instruction"] = True
             await db.update_pending_state(pending["id"], state)
-            await tg.send_text(chat_id, "💬 <b>Digite a nova instrução:</b>")
+            await tg.send_text(chat_id, "💬 <b>Digite a nova instrução:</b>", thread_id=topic_id)
         return
 
     # --- Parse standard callback: action:email_id:account ---
@@ -198,7 +199,7 @@ async def handle_callback(callback_query: dict, services: dict):
         pending = await db.get_pending_action(email_id, real_action, actor_id=actor_id)
         if not pending:
             return
-        ctx = _build_ctx(email_id, account, actor_id, chat_id, message_id, text, services, pending=pending)
+        ctx = _build_ctx(email_id, account, actor_id, chat_id, message_id, text, services, pending=pending, topic_id=topic_id)
         action_fn = _get_action_fn(real_action)
         if action_fn:
             status = await action_fn(ctx)
@@ -228,7 +229,7 @@ async def handle_callback(callback_query: dict, services: dict):
     if action == "reclassify":
         await tg.answer_callback(callback_id, "🔄 Selecione a urgência")
         account_data = await db.get_account(account)
-        ctx = _build_ctx(email_id, account, actor_id, chat_id, message_id, text, services)
+        ctx = _build_ctx(email_id, account, actor_id, chat_id, message_id, text, services, topic_id=topic_id)
         if account_data:
             ctx["account_id"] = account_data["id"]
         await feedback.start_reclassify(ctx)
@@ -238,7 +239,7 @@ async def handle_callback(callback_query: dict, services: dict):
     if action == "custom_reply":
         await tg.answer_callback(callback_id, "💬 Aguardando instrução")
         account_data = await db.get_account(account)
-        ctx = _build_ctx(email_id, account, actor_id, chat_id, message_id, text, services)
+        ctx = _build_ctx(email_id, account, actor_id, chat_id, message_id, text, services, topic_id=topic_id)
         if account_data:
             ctx["account_id"] = account_data["id"]
         await reply.start_reply(ctx)
@@ -256,7 +257,7 @@ async def handle_callback(callback_query: dict, services: dict):
             "urgency": _extract_urgency(text),
         }
         acct_id = account_data["id"] if account_data else None
-        await db.create_pending_action(acct_id, email_id, "create_task", actor_id, chat_id, message_id, state)
+        await db.create_pending_action(acct_id, email_id, "create_task", actor_id, chat_id, message_id, state, topic_id=topic_id)
         keyboard = {"inline_keyboard": [[
             {"text": "❌ Cancelar", "callback_data": f"cancel_create_task:{email_id}"}
         ]]}
@@ -264,6 +265,7 @@ async def handle_callback(callback_query: dict, services: dict):
             chat_id,
             "📝 <b>Descreva a tarefa:</b>\n\nExemplos:\n• Ligar para o cliente\n• Revisar documentação\n\nDeixe em branco para usar o assunto.",
             reply_markup=keyboard,
+            thread_id=topic_id,
         )
         return
 
@@ -283,7 +285,7 @@ async def handle_callback(callback_query: dict, services: dict):
         account_data = await db.get_account(account)
         acct_id = account_data["id"] if account_data else None
         state = {"original_text": text, "account": account, "sender": sender}
-        await db.create_pending_action(acct_id, email_id, action, actor_id, chat_id, message_id, state)
+        await db.create_pending_action(acct_id, email_id, action, actor_id, chat_id, message_id, state, topic_id=topic_id)
         confirm_keyboard = {
             "inline_keyboard": [[
                 {"text": "✅ Confirmar", "callback_data": f"confirm_{action}:{email_id}:{account}"},
@@ -307,6 +309,7 @@ async def handle_text_message(message: dict, services: dict):
         services: Dict with keys 'db', 'gmail', 'telegram', 'llm'.
     """
     chat_id = message.get("chat", {}).get("id")
+    topic_id = message.get("message_thread_id")
     actor_id = message.get("from", {}).get("id", 0)
     text = message.get("text", "")
     db = services["db"]
@@ -327,13 +330,13 @@ async def handle_text_message(message: dict, services: dict):
 
     # Check for pending config conversation
     for config_type in ("config_identidade", "config_playbook"):
-        pending = await db.get_pending_by_chat(chat_id, config_type, actor_id=actor_id)
+        pending = await db.get_pending_by_chat(chat_id, config_type, actor_id=actor_id, topic_id=topic_id)
         if pending:
             await handle_config_response(message, pending, services)
             return
 
     # Check for pending custom_reply waiting for instruction
-    pending = await db.get_pending_by_chat(chat_id, "custom_reply", actor_id=actor_id)
+    pending = await db.get_pending_by_chat(chat_id, "custom_reply", actor_id=actor_id, topic_id=topic_id)
     if pending:
         state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
         if state.get("waiting_instruction", True):
@@ -352,7 +355,7 @@ async def handle_text_message(message: dict, services: dict):
             return
 
     # Check for pending create_task waiting for details
-    pending = await db.get_pending_by_chat(chat_id, "create_task", actor_id=actor_id)
+    pending = await db.get_pending_by_chat(chat_id, "create_task", actor_id=actor_id, topic_id=topic_id)
     if pending:
         state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
         ctx = {
@@ -369,12 +372,12 @@ async def handle_text_message(message: dict, services: dict):
             "llm": llm,
         }
         status = await task.execute(ctx)
-        await tg.send_text(chat_id, status)
+        await tg.send_text(chat_id, status, thread_id=topic_id)
         await db.delete_pending_action(pending["id"])
         return
 
 
-def _build_ctx(email_id, account, actor_id, chat_id, message_id, text, services, pending=None):
+def _build_ctx(email_id, account, actor_id, chat_id, message_id, text, services, pending=None, topic_id=None):
     """Build action context dict."""
     state = {}
     if pending:
@@ -387,6 +390,7 @@ def _build_ctx(email_id, account, actor_id, chat_id, message_id, text, services,
         "subject": _extract_subject(text),
         "urgency": _extract_urgency(text),
         "chat_id": chat_id,
+        "topic_id": topic_id or (pending.get("topic_id") if pending else None),
         "message_id": message_id,
         "original_text": state.get("original_text", text),
         "actor_id": actor_id,

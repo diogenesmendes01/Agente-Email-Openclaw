@@ -239,14 +239,14 @@ class DatabaseService:
 
     # ── Pending Actions ──
 
-    async def create_pending_action(self, account_id, email_id, action_type, actor_id, chat_id, message_id, state=None):
+    async def create_pending_action(self, account_id, email_id, action_type, actor_id, chat_id, message_id, state=None, topic_id=None):
         """Create a pending action with 10-minute TTL."""
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                """INSERT INTO pending_actions (account_id, email_id, action_type, actor_id, chat_id, message_id, state)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """INSERT INTO pending_actions (account_id, email_id, action_type, actor_id, chat_id, topic_id, message_id, state)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                    RETURNING id""",
-                account_id, email_id, action_type, actor_id, chat_id, message_id,
+                account_id, email_id, action_type, actor_id, chat_id, topic_id, message_id,
                 json.dumps(state or {}),
             )
             return row["id"]
@@ -276,19 +276,19 @@ class DatabaseService:
                 )
             return dict(row) if row else None
 
-    async def get_pending_by_chat(self, chat_id, action_type, actor_id=None):
-        """Get pending action by chat_id and action_type, optionally filtered by actor_id."""
+    async def get_pending_by_chat(self, chat_id, action_type, actor_id=None, topic_id=None):
+        """Get pending action by chat_id and action_type, optionally filtered by actor_id and topic_id."""
         async with self._pool.acquire() as conn:
+            conditions = ["chat_id = $1", "action_type = $2", "expires_at > NOW()"]
+            params = [chat_id, action_type]
             if actor_id:
-                row = await conn.fetchrow(
-                    "SELECT * FROM pending_actions WHERE chat_id = $1 AND action_type = $2 AND actor_id = $3 AND expires_at > NOW() ORDER BY created_at DESC",
-                    chat_id, action_type, actor_id,
-                )
-            else:
-                row = await conn.fetchrow(
-                    "SELECT * FROM pending_actions WHERE chat_id = $1 AND action_type = $2 AND expires_at > NOW() ORDER BY created_at DESC",
-                    chat_id, action_type,
-                )
+                params.append(actor_id)
+                conditions.append(f"actor_id = ${len(params)}")
+            if topic_id:
+                params.append(topic_id)
+                conditions.append(f"topic_id = ${len(params)}")
+            query = f"SELECT * FROM pending_actions WHERE {' AND '.join(conditions)} ORDER BY created_at DESC"
+            row = await conn.fetchrow(query, *params)
             return dict(row) if row else None
 
     async def update_pending_state(self, pending_id, state):

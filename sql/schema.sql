@@ -116,6 +116,7 @@ CREATE TABLE pending_actions (
     action_type VARCHAR(50) NOT NULL,
     actor_id BIGINT NOT NULL,
     chat_id BIGINT,
+    topic_id BIGINT,
     message_id BIGINT,
     state JSONB DEFAULT '{}',
     expires_at TIMESTAMPTZ DEFAULT NOW() + INTERVAL '10 minutes',
