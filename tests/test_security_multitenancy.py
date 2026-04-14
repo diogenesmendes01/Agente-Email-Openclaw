@@ -133,7 +133,23 @@ async def test_confirm_action_isolated_by_actor():
         "message": {"chat": {"id": 100}, "message_id": 1, "text": "..."},
     }
     await handle_callback(callback, services)
-    services["db"].get_pending_action.assert_called_once_with("email1", "archive", actor_id=42)
+    services["db"].get_pending_action.assert_called_once_with("email1", "archive", actor_id=42, topic_id=None)
+
+
+@pytest.mark.asyncio
+async def test_confirm_action_isolated_by_topic():
+    """Confirm callback in a topic group should filter by topic_id."""
+    from orchestrator.handlers.telegram_callbacks import handle_callback
+    services = _make_services(allowed_user_ids={42})
+    services["db"].get_pending_action.return_value = None
+    callback = {
+        "id": "cb1",
+        "data": "confirm_archive:email1:test@gmail.com",
+        "from": {"id": 42},
+        "message": {"chat": {"id": 100}, "message_thread_id": 555, "message_id": 1, "text": "..."},
+    }
+    await handle_callback(callback, services)
+    services["db"].get_pending_action.assert_called_once_with("email1", "archive", actor_id=42, topic_id=555)
 
 
 # ── Topic-scoped pending actions ──

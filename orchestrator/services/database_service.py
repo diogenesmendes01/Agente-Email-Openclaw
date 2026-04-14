@@ -251,29 +251,22 @@ class DatabaseService:
             )
             return row["id"]
 
-    async def get_pending_action(self, email_id, action_type=None, actor_id=None):
-        """Get pending action by email_id, optionally filtered by action_type and actor_id."""
+    async def get_pending_action(self, email_id, action_type=None, actor_id=None, topic_id=None):
+        """Get pending action by email_id, optionally filtered by action_type, actor_id and topic_id."""
         async with self._pool.acquire() as conn:
-            if action_type and actor_id:
-                row = await conn.fetchrow(
-                    "SELECT * FROM pending_actions WHERE email_id = $1 AND action_type = $2 AND actor_id = $3 AND expires_at > NOW()",
-                    email_id, action_type, actor_id,
-                )
-            elif action_type:
-                row = await conn.fetchrow(
-                    "SELECT * FROM pending_actions WHERE email_id = $1 AND action_type = $2 AND expires_at > NOW()",
-                    email_id, action_type,
-                )
-            elif actor_id:
-                row = await conn.fetchrow(
-                    "SELECT * FROM pending_actions WHERE email_id = $1 AND actor_id = $2 AND expires_at > NOW() ORDER BY created_at DESC",
-                    email_id, actor_id,
-                )
-            else:
-                row = await conn.fetchrow(
-                    "SELECT * FROM pending_actions WHERE email_id = $1 AND expires_at > NOW() ORDER BY created_at DESC",
-                    email_id,
-                )
+            conditions = ["email_id = $1", "expires_at > NOW()"]
+            params = [email_id]
+            if action_type:
+                params.append(action_type)
+                conditions.append(f"action_type = ${len(params)}")
+            if actor_id:
+                params.append(actor_id)
+                conditions.append(f"actor_id = ${len(params)}")
+            if topic_id:
+                params.append(topic_id)
+                conditions.append(f"topic_id = ${len(params)}")
+            query = f"SELECT * FROM pending_actions WHERE {' AND '.join(conditions)} ORDER BY created_at DESC"
+            row = await conn.fetchrow(query, *params)
             return dict(row) if row else None
 
     async def get_pending_by_chat(self, chat_id, action_type, actor_id=None, topic_id=None):

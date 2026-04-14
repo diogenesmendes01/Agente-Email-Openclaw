@@ -131,7 +131,7 @@ async def handle_callback(callback_query: dict, services: dict):
         new_urgency = parts[1] if len(parts) > 1 else "medium"
         email_id = parts[2] if len(parts) > 2 else ""
         await tg.answer_callback(callback_id, f"✅ {new_urgency.upper()}")
-        pending = await db.get_pending_action(email_id, "reclassify", actor_id=actor_id)
+        pending = await db.get_pending_action(email_id, "reclassify", actor_id=actor_id, topic_id=topic_id)
         if pending:
             ctx = _build_ctx(email_id, "", actor_id, chat_id, message_id, text, services, pending=pending, topic_id=topic_id)
             ctx["new_urgency"] = new_urgency
@@ -145,7 +145,7 @@ async def handle_callback(callback_query: dict, services: dict):
     if action == "cancel_reclassify":
         email_id = parts[1] if len(parts) > 1 else ""
         await tg.answer_callback(callback_id, "❌ Cancelado")
-        pending = await db.get_pending_action(email_id, "reclassify", actor_id=actor_id)
+        pending = await db.get_pending_action(email_id, "reclassify", actor_id=actor_id, topic_id=topic_id)
         if pending:
             state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
             account = state.get("account", "")
@@ -157,7 +157,7 @@ async def handle_callback(callback_query: dict, services: dict):
     if action == "cancel_custom_reply":
         email_id = parts[1] if len(parts) > 1 else ""
         await tg.answer_callback(callback_id, "❌ Cancelado")
-        pending = await db.get_pending_action(email_id, "custom_reply", actor_id=actor_id)
+        pending = await db.get_pending_action(email_id, "custom_reply", actor_id=actor_id, topic_id=topic_id)
         if pending:
             await db.delete_pending_action(pending["id"])
         await tg.delete_message(chat_id, message_id)
@@ -167,7 +167,7 @@ async def handle_callback(callback_query: dict, services: dict):
     if action == "send_custom_draft":
         email_id = parts[1] if len(parts) > 1 else ""
         await tg.answer_callback(callback_id, "✉️ Enviando...")
-        pending = await db.get_pending_action(email_id, "custom_reply", actor_id=actor_id)
+        pending = await db.get_pending_action(email_id, "custom_reply", actor_id=actor_id, topic_id=topic_id)
         if pending:
             ctx = _build_ctx(email_id, "", actor_id, chat_id, message_id, text, services, pending=pending, topic_id=topic_id)
             status = await reply.send_draft(ctx)
@@ -180,7 +180,7 @@ async def handle_callback(callback_query: dict, services: dict):
     if action == "adjust_custom_draft":
         email_id = parts[1] if len(parts) > 1 else ""
         await tg.answer_callback(callback_id, "✏️ Digite nova instrução")
-        pending = await db.get_pending_action(email_id, "custom_reply", actor_id=actor_id)
+        pending = await db.get_pending_action(email_id, "custom_reply", actor_id=actor_id, topic_id=topic_id)
         if pending:
             state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
             state["waiting_instruction"] = True
@@ -196,7 +196,7 @@ async def handle_callback(callback_query: dict, services: dict):
     if action.startswith("confirm_"):
         real_action = action.replace("confirm_", "")
         await tg.answer_callback(callback_id, "✅ Executando...")
-        pending = await db.get_pending_action(email_id, real_action, actor_id=actor_id)
+        pending = await db.get_pending_action(email_id, real_action, actor_id=actor_id, topic_id=topic_id)
         if not pending:
             return
         ctx = _build_ctx(email_id, account, actor_id, chat_id, message_id, text, services, pending=pending, topic_id=topic_id)
@@ -215,7 +215,7 @@ async def handle_callback(callback_query: dict, services: dict):
     if action.startswith("cancel_"):
         real_action = action.replace("cancel_", "")
         await tg.answer_callback(callback_id, "❌ Cancelado")
-        pending = await db.get_pending_action(email_id, real_action, actor_id=actor_id)
+        pending = await db.get_pending_action(email_id, real_action, actor_id=actor_id, topic_id=topic_id)
         if pending:
             state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
             original_text = state.get("original_text", text)
@@ -272,7 +272,7 @@ async def handle_callback(callback_query: dict, services: dict):
     # --- CANCEL CREATE TASK ---
     if action == "cancel_create_task":
         await tg.answer_callback(callback_id, "❌ Cancelado")
-        pending = await db.get_pending_action(email_id, "create_task", actor_id=actor_id)
+        pending = await db.get_pending_action(email_id, "create_task", actor_id=actor_id, topic_id=topic_id)
         if pending:
             await db.delete_pending_action(pending["id"])
         await tg.delete_message(chat_id, message_id)
