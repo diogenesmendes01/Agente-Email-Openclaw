@@ -353,7 +353,9 @@ async def telegram_callback(request: Request):
         body = await request.json()
         logger.info(f"Telegram update: {json.dumps(body)[:500]}")
 
-        services = {"db": db, "gmail": gmail, "telegram": telegram, "llm": llm}
+        _settings = get_settings()
+        services = {"db": db, "gmail": gmail, "telegram": telegram, "llm": llm,
+                     "allowed_user_ids": _settings.telegram_allowed_user_ids}
 
         callback_query = body.get("callback_query")
         if callback_query:

@@ -113,6 +113,13 @@ async def handle_callback(callback_query: dict, services: dict):
     tg = services["telegram"]
     db = services["db"]
 
+    # Auth: only allowed users can trigger actions
+    allowed = services.get("allowed_user_ids", set())
+    if allowed and actor_id not in allowed:
+        logger.warning(f"Unauthorized callback from user {actor_id}")
+        await tg.answer_callback(callback_id, "⛔ Acesso não autorizado")
+        return
+
     parts = callback_data.split(":")
     action = parts[0] if parts else "unknown"
 
@@ -123,7 +130,7 @@ async def handle_callback(callback_query: dict, services: dict):
         new_urgency = parts[1] if len(parts) > 1 else "medium"
         email_id = parts[2] if len(parts) > 2 else ""
         await tg.answer_callback(callback_id, f"✅ {new_urgency.upper()}")
-        pending = await db.get_pending_action(email_id, "reclassify")
+        pending = await db.get_pending_action(email_id, "reclassify", actor_id=actor_id)
         if pending:
             ctx = _build_ctx(email_id, "", actor_id, chat_id, message_id, text, services, pending=pending)
             ctx["new_urgency"] = new_urgency
@@ -137,7 +144,7 @@ async def handle_callback(callback_query: dict, services: dict):
     if action == "cancel_reclassify":
         email_id = parts[1] if len(parts) > 1 else ""
         await tg.answer_callback(callback_id, "❌ Cancelado")
-        pending = await db.get_pending_action(email_id, "reclassify")
+        pending = await db.get_pending_action(email_id, "reclassify", actor_id=actor_id)
         if pending:
             state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
             account = state.get("account", "")
@@ -149,7 +156,7 @@ async def handle_callback(callback_query: dict, services: dict):
     if action == "cancel_custom_reply":
         email_id = parts[1] if len(parts) > 1 else ""
         await tg.answer_callback(callback_id, "❌ Cancelado")
-        pending = await db.get_pending_action(email_id, "custom_reply")
+        pending = await db.get_pending_action(email_id, "custom_reply", actor_id=actor_id)
         if pending:
             await db.delete_pending_action(pending["id"])
         await tg.delete_message(chat_id, message_id)
@@ -159,7 +166,7 @@ async def handle_callback(callback_query: dict, services: dict):
     if action == "send_custom_draft":
         email_id = parts[1] if len(parts) > 1 else ""
         await tg.answer_callback(callback_id, "✉️ Enviando...")
-        pending = await db.get_pending_action(email_id, "custom_reply")
+        pending = await db.get_pending_action(email_id, "custom_reply", actor_id=actor_id)
         if pending:
             ctx = _build_ctx(email_id, "", actor_id, chat_id, message_id, text, services, pending=pending)
             status = await reply.send_draft(ctx)
@@ -172,7 +179,7 @@ async def handle_callback(callback_query: dict, services: dict):
     if action == "adjust_custom_draft":
         email_id = parts[1] if len(parts) > 1 else ""
         await tg.answer_callback(callback_id, "✏️ Digite nova instrução")
-        pending = await db.get_pending_action(email_id, "custom_reply")
+        pending = await db.get_pending_action(email_id, "custom_reply", actor_id=actor_id)
         if pending:
             state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
             state["waiting_instruction"] = True
@@ -188,7 +195,7 @@ async def handle_callback(callback_query: dict, services: dict):
     if action.startswith("confirm_"):
         real_action = action.replace("confirm_", "")
         await tg.answer_callback(callback_id, "✅ Executando...")
-        pending = await db.get_pending_action(email_id, real_action)
+        pending = await db.get_pending_action(email_id, real_action, actor_id=actor_id)
         if not pending:
             return
         ctx = _build_ctx(email_id, account, actor_id, chat_id, message_id, text, services, pending=pending)
@@ -207,7 +214,7 @@ async def handle_callback(callback_query: dict, services: dict):
     if action.startswith("cancel_"):
         real_action = action.replace("cancel_", "")
         await tg.answer_callback(callback_id, "❌ Cancelado")
-        pending = await db.get_pending_action(email_id, real_action)
+        pending = await db.get_pending_action(email_id, real_action, actor_id=actor_id)
         if pending:
             state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
             original_text = state.get("original_text", text)
@@ -263,7 +270,7 @@ async def handle_callback(callback_query: dict, services: dict):
     # --- CANCEL CREATE TASK ---
     if action == "cancel_create_task":
         await tg.answer_callback(callback_id, "❌ Cancelado")
-        pending = await db.get_pending_action(email_id, "create_task")
+        pending = await db.get_pending_action(email_id, "create_task", actor_id=actor_id)
         if pending:
             await db.delete_pending_action(pending["id"])
         await tg.delete_message(chat_id, message_id)
@@ -300,10 +307,17 @@ async def handle_text_message(message: dict, services: dict):
         services: Dict with keys 'db', 'gmail', 'telegram', 'llm'.
     """
     chat_id = message.get("chat", {}).get("id")
+    actor_id = message.get("from", {}).get("id", 0)
     text = message.get("text", "")
     db = services["db"]
     tg = services["telegram"]
     llm = services["llm"]
+
+    # Auth: only allowed users can send commands/messages
+    allowed = services.get("allowed_user_ids", set())
+    if allowed and actor_id not in allowed:
+        logger.warning(f"Unauthorized message from user {actor_id}")
+        return
 
     # Check if it's a /config command
     from orchestrator.handlers.telegram_commands import is_command, handle_command, handle_config_response
@@ -313,13 +327,13 @@ async def handle_text_message(message: dict, services: dict):
 
     # Check for pending config conversation
     for config_type in ("config_identidade", "config_playbook"):
-        pending = await db.get_pending_by_chat(chat_id, config_type)
+        pending = await db.get_pending_by_chat(chat_id, config_type, actor_id=actor_id)
         if pending:
             await handle_config_response(message, pending, services)
             return
 
     # Check for pending custom_reply waiting for instruction
-    pending = await db.get_pending_by_chat(chat_id, "custom_reply")
+    pending = await db.get_pending_by_chat(chat_id, "custom_reply", actor_id=actor_id)
     if pending:
         state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
         if state.get("waiting_instruction", True):
@@ -338,7 +352,7 @@ async def handle_text_message(message: dict, services: dict):
             return
 
     # Check for pending create_task waiting for details
-    pending = await db.get_pending_by_chat(chat_id, "create_task")
+    pending = await db.get_pending_by_chat(chat_id, "create_task", actor_id=actor_id)
     if pending:
         state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
         ctx = {

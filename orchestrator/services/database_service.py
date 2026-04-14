@@ -251,13 +251,23 @@ class DatabaseService:
             )
             return row["id"]
 
-    async def get_pending_action(self, email_id, action_type=None):
-        """Get pending action by email_id, optionally filtered by action_type."""
+    async def get_pending_action(self, email_id, action_type=None, actor_id=None):
+        """Get pending action by email_id, optionally filtered by action_type and actor_id."""
         async with self._pool.acquire() as conn:
-            if action_type:
+            if action_type and actor_id:
+                row = await conn.fetchrow(
+                    "SELECT * FROM pending_actions WHERE email_id = $1 AND action_type = $2 AND actor_id = $3 AND expires_at > NOW()",
+                    email_id, action_type, actor_id,
+                )
+            elif action_type:
                 row = await conn.fetchrow(
                     "SELECT * FROM pending_actions WHERE email_id = $1 AND action_type = $2 AND expires_at > NOW()",
                     email_id, action_type,
+                )
+            elif actor_id:
+                row = await conn.fetchrow(
+                    "SELECT * FROM pending_actions WHERE email_id = $1 AND actor_id = $2 AND expires_at > NOW() ORDER BY created_at DESC",
+                    email_id, actor_id,
                 )
             else:
                 row = await conn.fetchrow(
@@ -266,13 +276,19 @@ class DatabaseService:
                 )
             return dict(row) if row else None
 
-    async def get_pending_by_chat(self, chat_id, action_type):
-        """Get pending action by chat_id and action_type (for text message matching)."""
+    async def get_pending_by_chat(self, chat_id, action_type, actor_id=None):
+        """Get pending action by chat_id and action_type, optionally filtered by actor_id."""
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM pending_actions WHERE chat_id = $1 AND action_type = $2 AND expires_at > NOW() ORDER BY created_at DESC",
-                chat_id, action_type,
-            )
+            if actor_id:
+                row = await conn.fetchrow(
+                    "SELECT * FROM pending_actions WHERE chat_id = $1 AND action_type = $2 AND actor_id = $3 AND expires_at > NOW() ORDER BY created_at DESC",
+                    chat_id, action_type, actor_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT * FROM pending_actions WHERE chat_id = $1 AND action_type = $2 AND expires_at > NOW() ORDER BY created_at DESC",
+                    chat_id, action_type,
+                )
             return dict(row) if row else None
 
     async def update_pending_state(self, pending_id, state):
@@ -348,6 +364,15 @@ class DatabaseService:
         """Delete a playbook by id."""
         async with self._pool.acquire() as conn:
             await conn.execute("DELETE FROM playbooks WHERE id = $1", playbook_id)
+
+    async def delete_playbook_owned(self, playbook_id, company_id) -> bool:
+        """Delete a playbook only if it belongs to the given company. Returns True if deleted."""
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM playbooks WHERE id = $1 AND company_id = $2",
+                playbook_id, company_id,
+            )
+            return result != "DELETE 0"
 
     # ── Domain Rules ──
 

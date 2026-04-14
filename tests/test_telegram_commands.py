@@ -46,13 +46,30 @@ async def test_config_playbook_list():
 
 
 @pytest.mark.asyncio
-async def test_config_playbook_delete():
+async def test_config_playbook_delete_with_ownership():
     from orchestrator.handlers.telegram_commands import handle_command
     services = _make_services()
     msg = {"chat": {"id": 100}, "from": {"id": 42}, "text": "/config_playbook_delete 1"}
     services["db"].get_account_by_topic.return_value = {"id": 1}
+    services["db"].get_company_profile.return_value = {"id": 5, "company_name": "CW"}
+    services["db"].delete_playbook_owned.return_value = True
     await handle_command(msg, services)
-    services["db"].delete_playbook.assert_called_once_with(1)
+    services["db"].delete_playbook_owned.assert_called_once_with(1, 5)
+
+
+@pytest.mark.asyncio
+async def test_config_playbook_delete_wrong_owner():
+    """Deleting a playbook that belongs to another company should fail."""
+    from orchestrator.handlers.telegram_commands import handle_command
+    services = _make_services()
+    msg = {"chat": {"id": 100}, "from": {"id": 42}, "text": "/config_playbook_delete 99"}
+    services["db"].get_account_by_topic.return_value = {"id": 1}
+    services["db"].get_company_profile.return_value = {"id": 5, "company_name": "CW"}
+    services["db"].delete_playbook_owned.return_value = False  # not owned
+    await handle_command(msg, services)
+    services["db"].delete_playbook_owned.assert_called_once_with(99, 5)
+    call_text = services["telegram"].send_text.call_args[0][1]
+    assert "não encontrado" in call_text or "não pertence" in call_text
 
 
 @pytest.mark.asyncio

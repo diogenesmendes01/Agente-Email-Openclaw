@@ -16,9 +16,19 @@ def is_command(text: str) -> bool:
     return cmd in COMMANDS
 
 
+def _resolve_topic_id(message: dict) -> int:
+    """Extract the topic identifier for account resolution.
+
+    In groups with topics, ``message_thread_id`` is the real topic.
+    Falls back to ``chat.id`` for private chats / non-topic groups.
+    """
+    return message.get("message_thread_id") or message.get("chat", {}).get("id")
+
+
 async def handle_command(message: dict, services: dict):
     """Route and handle /config_* commands."""
     chat_id = message.get("chat", {}).get("id")
+    topic_id = _resolve_topic_id(message)
     actor_id = message.get("from", {}).get("id")
     text = message.get("text", "").strip()
     parts = text.split(maxsplit=1)
@@ -29,13 +39,13 @@ async def handle_command(message: dict, services: dict):
     tg = services["telegram"]
 
     if cmd == "/config_identidade":
-        await _start_config_identidade(chat_id, actor_id, db, tg)
+        await _start_config_identidade(chat_id, topic_id, actor_id, db, tg)
     elif cmd == "/config_playbook":
-        await _start_config_playbook(chat_id, actor_id, db, tg)
+        await _start_config_playbook(chat_id, topic_id, actor_id, db, tg)
     elif cmd == "/config_playbook_list":
-        await _list_playbooks(chat_id, actor_id, db, tg)
+        await _list_playbooks(chat_id, topic_id, db, tg)
     elif cmd == "/config_playbook_delete":
-        await _delete_playbook(chat_id, args, db, tg)
+        await _delete_playbook(chat_id, topic_id, args, db, tg)
     elif cmd == "/help_config":
         await tg.send_text(chat_id, (
             "<b>Comandos de Configuração:</b>\n\n"
@@ -46,9 +56,9 @@ async def handle_command(message: dict, services: dict):
         ))
 
 
-async def _start_config_identidade(chat_id, actor_id, db, tg):
+async def _start_config_identidade(chat_id, topic_id, actor_id, db, tg):
     """Start identity configuration conversation."""
-    account = await db.get_account_by_topic(chat_id)
+    account = await db.get_account_by_topic(topic_id)
     account_id = account["id"] if account else None
     await db.create_pending_action(
         account_id, "config", "config_identidade", actor_id, chat_id, None,
@@ -60,9 +70,9 @@ async def _start_config_identidade(chat_id, actor_id, db, tg):
     ))
 
 
-async def _start_config_playbook(chat_id, actor_id, db, tg):
+async def _start_config_playbook(chat_id, topic_id, actor_id, db, tg):
     """Start playbook creation conversation."""
-    account = await db.get_account_by_topic(chat_id)
+    account = await db.get_account_by_topic(topic_id)
     account_id = account["id"] if account else None
     await db.create_pending_action(
         account_id, "config", "config_playbook", actor_id, chat_id, None,
@@ -75,9 +85,9 @@ async def _start_config_playbook(chat_id, actor_id, db, tg):
     ))
 
 
-async def _list_playbooks(chat_id, actor_id, db, tg):
+async def _list_playbooks(chat_id, topic_id, db, tg):
     """List active playbooks."""
-    account = await db.get_account_by_topic(chat_id)
+    account = await db.get_account_by_topic(topic_id)
     account_id = account["id"] if account else None
     if not account_id:
         await tg.send_text(chat_id, "\u274c Conta não encontrada para este tópico.")
@@ -97,14 +107,30 @@ async def _list_playbooks(chat_id, actor_id, db, tg):
     await tg.send_text(chat_id, "\n".join(lines))
 
 
-async def _delete_playbook(chat_id, args, db, tg):
-    """Delete a playbook by ID."""
+async def _delete_playbook(chat_id, topic_id, args, db, tg):
+    """Delete a playbook by ID, validating ownership via current account."""
     try:
         playbook_id = int(args.strip())
-        await db.delete_playbook(playbook_id)
-        await tg.send_text(chat_id, f"\u2705 Playbook #{playbook_id} removido.")
     except (ValueError, TypeError):
         await tg.send_text(chat_id, "\u274c Uso: /config_playbook_delete <id>")
+        return
+
+    # Resolve account → company to verify ownership
+    account = await db.get_account_by_topic(topic_id)
+    account_id = account["id"] if account else None
+    if not account_id:
+        await tg.send_text(chat_id, "\u274c Conta não encontrada para este tópico.")
+        return
+    profile = await db.get_company_profile(account_id)
+    if not profile:
+        await tg.send_text(chat_id, "\u274c Nenhum perfil de empresa configurado.")
+        return
+
+    deleted = await db.delete_playbook_owned(playbook_id, profile["id"])
+    if deleted:
+        await tg.send_text(chat_id, f"\u2705 Playbook #{playbook_id} removido.")
+    else:
+        await tg.send_text(chat_id, f"\u274c Playbook #{playbook_id} não encontrado ou não pertence a esta empresa.")
 
 
 async def handle_config_response(message: dict, pending: dict, services: dict):
