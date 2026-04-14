@@ -168,13 +168,14 @@ class DatabaseService:
     # ── Decisions ──
 
     async def log_decision(self, data: Dict) -> int:
-        """Log email processing decision."""
+        """Log email processing decision. Skips silently if already exists."""
         async with self._pool.acquire() as conn:
             return await conn.fetchval(
                 """INSERT INTO decisions
                    (account_id, email_id, subject, sender, classification,
                     priority, category, action, summary, reasoning_tokens)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                   ON CONFLICT (account_id, email_id) DO NOTHING
                    RETURNING id""",
                 data.get("account_id"),
                 data.get("email_id"),

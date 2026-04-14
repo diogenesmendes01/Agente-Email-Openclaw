@@ -205,13 +205,6 @@ class EmailProcessor:
             classification = await self.llm.classify_email(email, context)
             result["classification"] = classification
             
-            # Se classificado como não importante com alta confiança, pular processamento
-            if not classification.get("importante") and classification.get("confianca", 0) >= 0.8:
-                logger.info(f"[{email_id}] Email não importante, pulando...")
-                result["status"] = "skipped"
-                result["reason"] = "Email não importante"
-                return result
-
             # 4.5. Check playbooks (if configured)
             auto_responded = False
             if self.playbook_service and account_id:

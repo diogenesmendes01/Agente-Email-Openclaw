@@ -115,224 +115,362 @@ O Telegram usa **webhook** (nao long-polling) com confirmacao para acoes perigos
 
 ## Guia de Setup Completo (do zero)
 
-### Pre-requisitos
+Este guia cobre **tudo** que voce precisa fazer antes e durante a configuracao, incluindo a criacao de contas e obtencao de IDs em servicos externos.
 
-#### Pacotes do sistema (Ubuntu/Debian)
+---
+
+### Fase 1: Preparar o Servidor
+
+#### 1.1 Pacotes do sistema (Ubuntu/Debian)
 
 ```bash
-apt update && apt install -y python3 python3-pip python3-venv python-is-python3 git curl
+apt update && apt install -y python3 python3-pip python3-venv python-is-python3 \
+  git curl postgresql docker.io docker-compose
 ```
 
-> **Nota:** O wizard (`setup_wizard.py`) instala automaticamente as dependencias Python (`requirements.txt`), incluindo `rich`, `python-dotenv`, `psycopg2-binary`, `requests`, etc. Voce nao precisa rodar `pip install` manualmente.
+> O wizard (`setup_wizard.py`) instala as dependencias Python automaticamente. Voce **nao** precisa rodar `pip install` manualmente.
 
-#### Servicos externos
+#### 1.2 Instalar e configurar PostgreSQL
 
-| Ferramenta | Para que serve | Como instalar |
-|------------|---------------|---------------|
-| **Python 3.11+** | Rodar o agente | `apt install python3` ou [python.org/downloads](https://www.python.org/downloads/) |
-| **PostgreSQL 14+** | Banco relacional principal | `apt install postgresql` ou via Docker |
-| **Docker + Docker Compose** (opcional) | Rodar PostgreSQL, Qdrant e o orchestrator em containers | [docs.docker.com/get-docker](https://docs.docker.com/get-docker/) |
-| **Google Cloud CLI (gcloud)** | Configurar Gmail API e Pub/Sub | [cloud.google.com/sdk/docs/install](https://cloud.google.com/sdk/docs/install) |
-| **Tailscale** | Expor webhook via HTTPS (Funnel) | [tailscale.com/download](https://tailscale.com/download) |
+```bash
+# Iniciar o servico
+systemctl start postgresql
+systemctl enable postgresql
 
-> **PostgreSQL:** pode ser instalado direto na VPS (`apt install postgresql`) ou rodado via Docker. O wizard configura o banco independente de como ele foi instalado — basta fornecer a `DATABASE_URL` correta.
+# Criar usuario e banco
+sudo -u postgres psql <<EOF
+CREATE USER emailagent WITH PASSWORD 'SUA_SENHA_AQUI';
+CREATE DATABASE emailagent OWNER emailagent;
+GRANT ALL PRIVILEGES ON DATABASE emailagent TO emailagent;
+\c emailagent
+GRANT ALL ON SCHEMA public TO emailagent;
+EOF
+```
 
-### Passo 1: Clonar o repositorio
+Teste a conexao:
+```bash
+psql "postgresql://emailagent:SUA_SENHA_AQUI@localhost:5432/emailagent" -c "SELECT 1;"
+```
+
+#### 1.3 Instalar Qdrant (Vector Database)
+
+```bash
+docker run -d --name qdrant --restart always \
+  -p 6333:6333 \
+  -v /root/qdrant_data:/qdrant/storage \
+  qdrant/qdrant:latest
+```
+
+Verifique: `curl http://localhost:6333/collections` deve retornar `{"result":{"collections":[]},"status":"ok"}`.
+
+#### 1.4 Instalar e configurar Tailscale Funnel
+
+O Tailscale Funnel expoe sua VPS via HTTPS (necessario para receber webhooks do Google Pub/Sub e Telegram).
+
+```bash
+# Instalar Tailscale
+curl -fsSL https://tailscale.com/install.sh | sh
+
+# Conectar (abre link para login)
+tailscale up
+
+# Ativar Funnel apontando para a porta do agente
+tailscale funnel --bg 8787
+```
+
+Anote a URL gerada (formato: `https://seu-hostname.tail-xxxxx.ts.net`). Voce vai usar ela nos passos seguintes.
+
+> **Dica:** Para ver a URL: `tailscale funnel status`
+
+---
+
+### Fase 2: Criar o Bot do Telegram
+
+#### 2.1 Criar o bot no BotFather
+
+1. No Telegram, abra conversa com **@BotFather**
+2. Envie `/newbot`
+3. Escolha um **nome** (ex: "Email Agent") e um **username** (ex: `email_agent_xyz_bot`)
+4. O BotFather retorna um **token** — guarde-o:
+   ```
+   123456789:AAHxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   ```
+
+#### 2.2 Desativar Group Privacy
+
+**Importante:** Por padrao, bots so recebem mensagens que sao comandos (`/start`) ou que mencionam o bot. Para o agente funcionar em grupos, desative o Group Privacy:
+
+1. No @BotFather, envie `/mybots`
+2. Selecione seu bot
+3. **Bot Settings** > **Group Privacy** > **Turn off**
+4. Deve aparecer: *"Privacy mode is disabled"*
+
+#### 2.3 Criar grupo e obter Chat ID
+
+1. Crie um **grupo** no Telegram (ou use um existente)
+2. Se quiser usar **Topics** (forum), ative em: Configuracoes do grupo > Topics
+3. **Adicione o bot ao grupo** e promova a **admin**
+4. Envie uma mensagem qualquer no grupo
+5. Abra no navegador:
+   ```
+   https://api.telegram.org/bot<SEU_TOKEN>/getUpdates
+   ```
+6. Procure pelo campo `"chat":{"id":-100xxxxxxxxxx}` — esse numero negativo e o **Chat ID**
+
+> **Se getUpdates retornar vazio:** Verifique se nao ha outra instancia do bot rodando (getUpdates so funciona com uma instancia). Delete o webhook primeiro: `https://api.telegram.org/bot<TOKEN>/deleteWebhook`
+
+#### 2.4 Obter seu User ID (para alertas DM)
+
+O agente envia alertas de erro diretamente na sua DM. Para isso, precisa do seu **User ID**:
+
+1. No Telegram, abra conversa com **@userinfobot**
+2. Envie qualquer mensagem
+3. Ele responde com seu **User ID** (numero positivo, ex: `947563152`)
+
+---
+
+### Fase 3: Configurar Google Cloud (Gmail API + Pub/Sub)
+
+#### 3.1 Criar projeto no Google Cloud
+
+1. Acesse [console.cloud.google.com](https://console.cloud.google.com/)
+2. Clique em **Selecionar projeto** > **Novo projeto**
+3. Escolha um nome (ex: `email-agent`) e clique em **Criar**
+4. Anote o **Project ID** (ex: `email-agent-493213`) — voce vai usar nos comandos abaixo
+
+#### 3.2 Instalar Google Cloud CLI (gcloud)
+
+Se ainda nao tem o `gcloud` instalado:
+
+```bash
+# Ubuntu/Debian
+curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list
+apt update && apt install -y google-cloud-cli
+
+# Autenticar
+gcloud auth login
+gcloud config set project SEU_PROJECT_ID
+```
+
+#### 3.3 Ativar APIs necessarias
+
+```bash
+gcloud services enable gmail.googleapis.com --project=SEU_PROJECT_ID
+gcloud services enable pubsub.googleapis.com --project=SEU_PROJECT_ID
+```
+
+#### 3.4 Configurar tela de consentimento OAuth
+
+1. No Google Cloud Console, va em **APIs & Services** > **OAuth consent screen**
+2. Selecione **External** (ou **Internal** se for Google Workspace)
+3. Preencha:
+   - **App name**: nome do seu projeto (ex: "Email Agent")
+   - **User support email**: seu email
+   - **Developer contact**: seu email
+4. Em **Scopes**, adicione:
+   - `https://www.googleapis.com/auth/gmail.readonly`
+   - `https://www.googleapis.com/auth/gmail.modify`
+   - `https://www.googleapis.com/auth/gmail.compose`
+5. Em **Test users**, adicione o email Gmail que sera monitorado
+6. Clique em **Salvar**
+
+> **Importante:** Enquanto o app estiver em modo "Testing", somente os emails listados em Test Users podem autorizar. Para uso em producao, publique o app.
+
+#### 3.5 Criar credenciais OAuth 2.0
+
+1. Va em **APIs & Services** > **Credentials**
+2. Clique em **Create Credentials** > **OAuth client ID**
+3. Tipo de aplicacao: **Desktop App**
+4. Nome: qualquer (ex: "Email Agent Desktop")
+5. Clique em **Criar**
+6. Clique em **Download JSON**
+7. Salve o arquivo como `credentials/client_secret.json` na raiz do projeto:
+   ```bash
+   mkdir -p credentials
+   # Copie o JSON baixado para credentials/client_secret.json
+   ```
+
+#### 3.6 Criar Topic do Pub/Sub
+
+```bash
+gcloud pubsub topics create gmail-watch --project=SEU_PROJECT_ID
+```
+
+#### 3.7 Dar permissao ao Gmail no Topic
+
+```bash
+gcloud pubsub topics add-iam-policy-binding gmail-watch \
+  --project=SEU_PROJECT_ID \
+  --member="serviceAccount:gmail-api-push@system.gserviceaccount.com" \
+  --role="roles/pubsub.publisher"
+```
+
+#### 3.8 Gerar token de seguranca do webhook
+
+```bash
+# Linux/Mac:
+openssl rand -hex 16
+# Exemplo de saida: 63e0299250b544008b177efa047822be
+```
+
+Guarde esse token — ele sera usado na subscription do Pub/Sub e no `.env` como `GMAIL_HOOK_TOKEN_1`.
+
+#### 3.9 Criar Subscription do Pub/Sub
+
+A subscription conecta o Pub/Sub ao seu agente via Tailscale Funnel:
+
+```bash
+gcloud pubsub subscriptions create gmail-sub \
+  --topic=gmail-watch \
+  --project=SEU_PROJECT_ID \
+  --push-endpoint="https://SEU_HOSTNAME.tail-xxxxx.ts.net/hooks/gmail?token=SEU_TOKEN_HEX" \
+  --ack-deadline=60
+```
+
+> Substitua `SEU_HOSTNAME.tail-xxxxx.ts.net` pela URL do Tailscale Funnel (Fase 1.4) e `SEU_TOKEN_HEX` pelo token gerado no passo 3.8.
+
+---
+
+### Fase 4: Configurar APIs de IA
+
+#### 4.1 OpenRouter (LLM principal — classificacao, resumo, decisao)
+
+1. Crie conta em [openrouter.ai](https://openrouter.ai/)
+2. Va em **Keys** > **Create Key**
+3. Adicione creditos (modelos como `google/gemini-2.5-flash` sao baratos)
+4. Copie a key (formato: `sk-or-v1-xxxx`)
+
+#### 4.2 OpenAI (embeddings — memoria vetorial)
+
+> **Opcional:** O agente funciona sem embeddings (Qdrant fica vazio), mas perde a capacidade de buscar emails similares e aprender padroes.
+
+1. Crie conta em [platform.openai.com](https://platform.openai.com/)
+2. Va em **API Keys** > **Create new secret key**
+3. Adicione creditos (embeddings `text-embedding-3-small` custam ~$0.02/1M tokens)
+4. Copie a key (formato: `sk-xxxx`)
+
+---
+
+### Fase 5: Autenticar conta Gmail (OAuth)
+
+#### 5.1 Em servidor com navegador (desktop)
+
+```bash
+python scripts/gmail_auth.py --account seu@email.com
+```
+
+O navegador abre automaticamente para voce autorizar o acesso.
+
+#### 5.2 Em servidor sem navegador (VPS headless)
+
+```bash
+python scripts/gmail_auth.py --account seu@email.com
+```
+
+O script detecta que nao ha navegador e exibe um link:
+
+```
+Abra este link no navegador do seu PC:
+  https://accounts.google.com/o/oauth2/auth?...
+
+Apos autorizar, o navegador vai redirecionar para uma pagina que NAO vai carregar.
+Isso e normal! Copie a URL inteira da barra de endereco e cole aqui.
+```
+
+1. Copie o link e abra no navegador do seu **PC/celular**
+2. Faca login com a conta Gmail que sera monitorada
+3. Autorize o acesso
+4. O navegador redireciona para `http://localhost/...` — a pagina **nao carrega** (normal!)
+5. Copie a **URL inteira** da barra de endereco
+6. Cole no terminal da VPS
+
+O token e salvo em `credentials/token_seu@email.com.json`.
+
+> **Dica:** Para monitorar varias contas, repita o processo para cada email.
+
+---
+
+### Fase 6: Rodar o Setup Wizard
+
+Com tudo preparado, clone o projeto e rode o wizard:
 
 ```bash
 git clone https://github.com/diogenesmendes01/Agente-Email-Openclaw.git
 cd Agente-Email-Openclaw
+
+# Copiar o client_secret.json para o projeto
+cp /caminho/do/client_secret.json credentials/
+
+python setup_wizard.py
 ```
 
-### Passo 2: Criar o Bot do Telegram
+O wizard:
+1. Cria um ambiente virtual (`.venv/`) automaticamente
+2. Instala todas as dependencias Python
+3. Guia voce pelas variaveis de ambiente interativamente
+4. Cria as tabelas no PostgreSQL
+5. Valida o bot do Telegram e descobre o Chat ID
+6. Configura as contas Gmail (OAuth + Watch)
+7. Importa playbooks (se houver)
 
-1. Abra o Telegram e busque por **@BotFather**
-2. Envie `/newbot`
-3. Escolha um nome (ex: "Email Agent") e um username (ex: `email_agent_xyz_bot`)
-4. O BotFather vai retornar um **token** no formato `123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11` — guarde isso
-5. Para obter o **Chat ID**:
-   - Crie um grupo no Telegram e adicione o bot
-   - Envie uma mensagem qualquer no grupo
-   - Acesse `https://api.telegram.org/bot<SEU_TOKEN>/getUpdates` no navegador
-   - Procure por `"chat":{"id":-100xxxxxxxxxx}` — esse numero negativo e o seu Chat ID
-   - Se quiser usar **Topics** (forum), ative "Topics" nas configuracoes do grupo
+> **Reexecutar:** Se precisar reconfigurar algo, rode `python setup_wizard.py` novamente. Ele detecta a instalacao anterior e mostra um menu.
 
-### Passo 3: Configurar APIs de IA
+---
 
-#### OpenRouter (LLM principal)
-1. Crie uma conta em [openrouter.ai](https://openrouter.ai/)
-2. Va em **Keys** e crie uma API key
-3. Adicione creditos (o modelo padrao `z-ai/glm-5-turbo` e barato)
-4. Copie a key (comeca com `sk-or-v1-`)
-
-#### OpenAI (embeddings)
-1. Crie uma conta em [platform.openai.com](https://platform.openai.com/)
-2. Va em **API Keys** e crie uma key
-3. Adicione creditos (embeddings `text-embedding-3-small` custam ~$0.02/1M tokens)
-4. Copie a key (comeca com `sk-`)
-
-### Passo 4: Configurar Google Cloud, Gmail API e OAuth
-
-1. Crie um projeto no [Google Cloud Console](https://console.cloud.google.com/)
-2. Ative a **Gmail API** e o **Pub/Sub**:
-   ```bash
-   gcloud services enable gmail.googleapis.com --project=SEU_PROJETO
-   gcloud services enable pubsub.googleapis.com --project=SEU_PROJETO
-   ```
-3. Crie **credenciais OAuth 2.0**:
-   - Va em **APIs & Services > Credentials > Create Credentials > OAuth client ID**
-   - Tipo: **Desktop App**
-   - Baixe o JSON e salve como `credentials/client_secret.json` no projeto
-4. Configure a **tela de consentimento** (OAuth consent screen):
-   - Tipo: **External** (ou Internal se for Google Workspace)
-   - Adicione os escopos: `gmail.readonly`, `gmail.modify`, `gmail.compose`
-   - Adicione seu email como **Test user** (enquanto o app estiver em modo de teste)
-5. Crie o **topic** do Pub/Sub:
-   ```bash
-   gcloud pubsub topics create gmail-watch --project=SEU_PROJETO
-   ```
-6. De permissao para o Gmail publicar no topic:
-   ```bash
-   gcloud pubsub topics add-iam-policy-binding gmail-watch \
-     --project=SEU_PROJETO \
-     --member="serviceAccount:gmail-api-push@system.gserviceaccount.com" \
-     --role="roles/pubsub.publisher"
-   ```
-
-### Passo 5: Autenticar conta Gmail
-
-O agente usa a Gmail API diretamente (sem ferramentas externas). Autentique cada conta:
+### Fase 7: Iniciar o Agente
 
 ```bash
-pip install -r requirements.txt
-python scripts/gmail_auth.py --account seu@email.com
+# Foreground (desenvolvimento)
+.venv/bin/python -m uvicorn orchestrator.main:app --host 0.0.0.0 --port 8787
+
+# Background (producao)
+nohup .venv/bin/python -m uvicorn orchestrator.main:app --host 0.0.0.0 --port 8787 > agent.log 2>&1 &
 ```
 
-- O navegador abre para voce autorizar o acesso
-- O token e salvo em `credentials/token_seu@email.com.json`
-- Para adicionar mais contas, repita o comando com outro email
+O agente registra o webhook do Telegram automaticamente no startup.
 
-7. Gere um token para o webhook (qualquer string aleatoria):
-   ```bash
-   # Linux/Mac:
-   openssl rand -hex 32
-   # Windows (PowerShell):
-   -join ((1..32) | ForEach-Object { '{0:x}' -f (Get-Random -Max 16) })
-   ```
-
-### Passo 6: Configurar variaveis de ambiente
-
-```bash
-cp .env.example .env
-```
-
-Edite o `.env`:
-
-```env
-# LLM
-OPENROUTER_API_KEY=sk-or-v1-xxxxx
-OPENAI_API_KEY=sk-xxxxx
-
-# Telegram
-TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
-TELEGRAM_CHAT_ID=-100xxxxxxxxxx
-TELEGRAM_WEBHOOK_SECRET=qualquer_string_aleatoria
-TELEGRAM_ALLOWED_USER_IDS=123456789
-TELEGRAM_ALERT_USER_ID=123456789
-
-# PostgreSQL
-POSTGRES_PASSWORD=senha_segura
-DATABASE_URL=postgresql://emailagent:senha_segura@postgres:5432/emailagent
-
-# Gmail (multiplas contas: GMAIL_ACCOUNT_1, GMAIL_HOOK_TOKEN_1, etc.)
-GMAIL_ACCOUNT_1=seu@email.com
-GMAIL_HOOK_TOKEN_1=seu_token_hex
-
-# Tailscale
-FUNNEL_BASE_URL=https://sua-maquina.tail-xxxxx.ts.net
-
-# Qdrant (nao altere se estiver usando Docker Compose)
-QDRANT_HOST=qdrant
-QDRANT_PORT=6333
-
-# Opcional
-LLM_MODEL=z-ai/glm-5-turbo
-LLM_VISION_MODEL=google/gemini-2.5-flash
-LEARNING_INTERVAL=50
-METRICS_RETENTION_DAYS=90
-ALERT_THROTTLE_MINUTES=15
-JOB_MAX_ATTEMPTS=5
-```
-
-### Passo 7: Subir os servicos
+#### Via Docker Compose (alternativo)
 
 ```bash
 docker-compose up -d
 ```
 
-Isso inicia 3 containers:
-- **postgres** — PostgreSQL 16 (porta 5432, schema automatico via init script)
-- **qdrant** — Vector database (porta 6333)
-- **orchestrator** — FastAPI app + background workers (porta 8787)
+Isso inicia 3 containers: `postgres`, `qdrant` e `orchestrator`.
 
-O orchestrator registra o webhook do Telegram automaticamente no startup.
+---
 
-Verifique:
+### Fase 8: Verificar e Testar
+
+#### 8.1 Health check
+
 ```bash
-docker-compose ps
-docker-compose logs -f  # logs em tempo real
 curl http://localhost:8787/health
+# {"status":"healthy","services":{"postgres":"connected","qdrant":"connected",...}}
 ```
 
-#### Rodar manualmente (desenvolvimento)
+#### 8.2 Teste de email
+
+1. Envie um email para a conta Gmail monitorada
+2. Aguarde ~10 segundos
+3. A notificacao deve chegar no Telegram com botoes de acao
+4. Verifique os logs: `tail -f agent.log`
+
+#### 8.3 Teste manual via API
 
 ```bash
-pip install -r requirements.txt
-
-# Terminal 1: PostgreSQL + Qdrant
-docker-compose up postgres qdrant
-
-# Terminal 2: Orchestrator
-DATABASE_URL=postgresql://emailagent:senha@localhost:5432/emailagent \
-  uvicorn orchestrator.main:app --host 127.0.0.1 --port 8787
+curl -X POST http://localhost:8787/hooks/gmail/test \
+  -H "Content-Type: application/json" \
+  -d '{"emailId":"SEU_EMAIL_ID","account":"seu@email.com"}'
 ```
 
-### Passo 8: Configurar Tailscale Funnel
+---
 
-```bash
-tailscale up
-tailscale funnel --bg http://127.0.0.1:8787
-```
-
-Anote a URL gerada (formato: `https://sua-maquina.tail-xxxxx.ts.net`).
-
-### Passo 9: Configurar Gmail Watch (Pub/Sub)
-
-1. Crie a subscription apontando para o Tailscale Funnel:
-   ```bash
-   gcloud pubsub subscriptions create gmail-watch-sub \
-     --topic=gmail-watch \
-     --project=SEU_PROJETO \
-     --push-endpoint="https://sua-maquina.tail-xxxxx.ts.net/hooks/gmail?token=SEU_TOKEN"
-   ```
-
-2. Ative o Gmail Watch:
-   ```bash
-   python scripts/gmail_watch.py \
-     --account seu@email.com \
-     --topic projects/SEU_PROJETO/topics/gmail-watch
-   ```
-
-> **Importante:** O Gmail Watch expira a cada 7 dias. Configure um cron para renovar:
-> ```bash
-> 0 0 */6 * * cd /caminho/do/projeto && python scripts/gmail_watch.py --account seu@email.com --topic projects/SEU_PROJETO/topics/gmail-watch
-> ```
-
-### Passo 10: Configurar Playbooks (opcional)
+### Fase 9: Configurar Playbooks (opcional)
 
 #### Via Telegram (interativo)
 ```
-/config_identidade    # configura empresa
+/config_identidade    # configura empresa (nome, CNPJ, tom, assinatura)
 /config_playbook      # cria playbook passo a passo
 ```
 
@@ -343,24 +481,62 @@ cp playbooks/modelo.yaml.example playbooks/minha-empresa.yaml
 python scripts/import_playbooks.py playbooks/minha-empresa.yaml --account-id 1
 ```
 
-### Passo 11: Testar
+---
 
-1. **Health check:**
-   ```bash
-   curl http://localhost:8787/health
-   # {"status":"healthy","services":{"postgres":"connected","qdrant":"connected",...},"queue":{"pending_jobs":0}}
-   ```
+### Fase 10: Configurar inicio automatico (producao)
 
-2. **Enviar email de teste** e verificar:
-   - Logs: `docker-compose logs -f orchestrator`
-   - Notificacao no Telegram com botoes de acao
+#### Gmail Watch (renovar a cada 7 dias)
 
-3. **Teste manual via API:**
-   ```bash
-   curl -X POST http://localhost:8787/hooks/gmail/test \
-     -H "Content-Type: application/json" \
-     -d '{"emailId":"SEU_EMAIL_ID","account":"seu@email.com"}'
-   ```
+```bash
+# Cron para renovar o Watch
+crontab -e
+# Adicione:
+0 0 */6 * * cd /caminho/do/projeto && .venv/bin/python scripts/gmail_watch.py --account seu@email.com --topic projects/SEU_PROJECT_ID/topics/gmail-watch
+```
+
+#### Systemd Service (auto-restart)
+
+Crie `/etc/systemd/system/email-agent.service`:
+```ini
+[Unit]
+Description=Email Agent - Orchestrator
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/caminho/do/Agente-Email-Openclaw
+EnvironmentFile=/caminho/do/Agente-Email-Openclaw/.env
+ExecStart=/caminho/do/Agente-Email-Openclaw/.venv/bin/python -m uvicorn orchestrator.main:app --host 0.0.0.0 --port 8787
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl daemon-reload
+systemctl enable email-agent
+systemctl start email-agent
+```
+
+---
+
+### Resumo dos IDs e tokens necessarios
+
+| Item | Onde obter | Formato | Usado em |
+|------|-----------|---------|----------|
+| **TELEGRAM_BOT_TOKEN** | @BotFather > `/newbot` | `123456:AAHxxx...` | `.env` |
+| **TELEGRAM_CHAT_ID** | `getUpdates` do bot | `-100xxxxxxxxxx` (negativo) | `.env` |
+| **TELEGRAM_ALERT_USER_ID** | @userinfobot | `947563152` (positivo) | `.env` |
+| **OPENROUTER_API_KEY** | openrouter.ai > Keys | `sk-or-v1-xxx` | `.env` |
+| **OPENAI_API_KEY** | platform.openai.com > API Keys | `sk-xxx` | `.env` |
+| **Google Project ID** | Google Cloud Console | `email-agent-493213` | comandos `gcloud` |
+| **GMAIL_HOOK_TOKEN_1** | `openssl rand -hex 16` | `63e029...` | `.env` + Pub/Sub subscription |
+| **client_secret.json** | Google Cloud > Credentials > OAuth | JSON file | `credentials/` |
+| **DATABASE_URL** | Criado no passo 1.2 | `postgresql://user:pass@host/db` | `.env` |
+| **FUNNEL_BASE_URL** | Tailscale Funnel | `https://host.tail-xxx.ts.net` | `.env` + Pub/Sub subscription |
 
 ---
 

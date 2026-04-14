@@ -269,10 +269,13 @@ class GmailService:
             return []
 
         try:
+            # Usar historyId - 1 pois o Pub/Sub envia o ID da mudança
+            # e history.list retorna mudanças DEPOIS do startHistoryId
+            start_id = str(max(1, int(history_id) - 1))
             response = await asyncio.to_thread(
                 service.users().history().list(
                     userId="me",
-                    startHistoryId=history_id,
+                    startHistoryId=start_id,
                     historyTypes=["messageAdded"],
                     labelId="INBOX"
                 ).execute
@@ -285,6 +288,20 @@ class GmailService:
                     msg_id = msg.get("id")
                     if msg_id:
                         message_ids.append(msg_id)
+
+            # Fallback: se history vazio, buscar mensagem mais recente da INBOX
+            if not message_ids:
+                logger.info(f"History vazio, buscando mensagem mais recente da INBOX...")
+                latest = await asyncio.to_thread(
+                    service.users().messages().list(
+                        userId="me",
+                        labelIds=["INBOX"],
+                        maxResults=1,
+                    ).execute
+                )
+                msgs = latest.get("messages", [])
+                if msgs:
+                    message_ids = [msgs[0]["id"]]
 
             return message_ids
         except HttpError as e:

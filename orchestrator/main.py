@@ -302,23 +302,33 @@ async def gmail_webhook(
         # Processar em background
         async def process_with_history():
             import asyncio
+            try:
+                messages_from_payload = pubsub_message.get("messages", []) if pubsub_message else []
 
-            messages_from_payload = pubsub_message.get("messages", []) if pubsub_message else []
+                if messages_from_payload:
+                    logger.info(f"Processando {len(messages_from_payload)} emails do payload direto")
+                    for msg in messages_from_payload:
+                        msg_id = msg.get("id")
+                        if msg_id and not _is_duplicate(msg_id):
+                            await processor.process_email(msg_id, account)
+                elif history_id:
+                    logger.info(f"Buscando history {history_id} para {account}...")
+                    message_ids = await gmail.get_history(str(history_id), account)
+                    logger.info(f"History retornou {len(message_ids)} mensagens: {message_ids}")
+                    for msg_id in message_ids:
+                        if not _is_duplicate(msg_id):
+                            logger.info(f"Processando email {msg_id}...")
+                            await processor.process_email(msg_id, account)
+                        else:
+                            logger.info(f"Email {msg_id} duplicado, ignorando")
+                else:
+                    logger.warning("Nenhum payload, history_id ou email_id para processar")
 
-            if messages_from_payload:
-                logger.info(f"Processando {len(messages_from_payload)} emails do payload direto")
-                for msg in messages_from_payload:
-                    msg_id = msg.get("id")
-                    if msg_id and not _is_duplicate(msg_id):
-                        await processor.process_email(msg_id, account)
-            elif history_id:
-                message_ids = await gmail.get_history(str(history_id), account)
-                for msg_id in message_ids:
-                    if not _is_duplicate(msg_id):
-                        await processor.process_email(msg_id, account)
-
-            if email_id and not _is_duplicate(email_id):
-                await processor.process_email(email_id, account)
+                if email_id and not _is_duplicate(email_id):
+                    logger.info(f"Processando email_id direto: {email_id}")
+                    await processor.process_email(email_id, account)
+            except Exception as e:
+                logger.error(f"Erro no processamento background: {e}", exc_info=True)
 
         background_tasks.add_task(process_with_history)
 
