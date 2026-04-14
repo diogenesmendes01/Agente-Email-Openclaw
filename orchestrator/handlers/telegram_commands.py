@@ -5,7 +5,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Commands this module handles
-COMMANDS = {"/config_identidade", "/config_playbook", "/config_playbook_list", "/config_playbook_delete", "/help_config"}
+COMMANDS = {"/config_identidade", "/config_playbook", "/config_playbook_list", "/config_playbook_delete", "/help_config", "/custos"}
 
 
 def is_command(text: str) -> bool:
@@ -46,13 +46,17 @@ async def handle_command(message: dict, services: dict):
         await _list_playbooks(chat_id, topic_id, db, tg)
     elif cmd == "/config_playbook_delete":
         await _delete_playbook(chat_id, topic_id, args, db, tg)
+    elif cmd == "/custos":
+        await _show_costs(chat_id, topic_id, args, db, tg, services)
     elif cmd == "/help_config":
         await tg.send_text(chat_id, (
             "<b>Comandos de Configuração:</b>\n\n"
             "/config_identidade — Nome, CNPJ, tom, assinatura\n"
             "/config_playbook — Criar novo playbook\n"
             "/config_playbook_list — Listar playbooks ativos\n"
-            "/config_playbook_delete &lt;id&gt; — Remover playbook"
+            "/config_playbook_delete &lt;id&gt; — Remover playbook\n"
+            "/custos — Relatório de custos API (7 dias)\n"
+            "/custos 30 — Relatório dos últimos 30 dias"
         ), thread_id=message.get("message_thread_id"))
 
 
@@ -141,6 +145,48 @@ async def _delete_playbook(chat_id, topic_id, args, db, tg):
         await tg.send_text(chat_id, f"\u2705 Playbook #{playbook_id} removido.", thread_id=thread_id)
     else:
         await tg.send_text(chat_id, f"\u274c Playbook #{playbook_id} não encontrado ou não pertence a esta empresa.", thread_id=thread_id)
+
+
+async def _show_costs(chat_id, topic_id, args, db, tg, services):
+    """Show API cost summary via Telegram."""
+    thread_id = topic_id if topic_id != chat_id else None
+    # Parse days from args (default 7)
+    try:
+        days = int(args.strip()) if args.strip() else 7
+        days = min(max(days, 1), 90)
+    except ValueError:
+        days = 7
+
+    account = await db.get_account_by_topic(topic_id)
+    if not account:
+        await tg.send_text(chat_id, "❌ Conta não encontrada para este tópico.", thread_id=thread_id)
+        return
+
+    metrics = services.get("metrics")
+    if not metrics:
+        await tg.send_text(chat_id, "❌ Serviço de métricas não disponível.", thread_id=thread_id)
+        return
+
+    summary = await metrics.get_cost_summary(account["id"], days)
+
+    lines = [f"<b>💰 Relatório de Custos — Últimos {days} dias</b>\n"]
+    lines.append(f"📧 Emails processados: <b>{summary['total_emails']}</b>")
+    lines.append(f"⚙️ Tokens totais: <b>{summary['total_tokens']:,}</b>")
+    lines.append(f"💵 Custo total: <b>${summary['total_cost_usd']:.4f}</b>")
+
+    if summary["total_emails"] > 0:
+        avg_cost = summary["total_cost_usd"] / summary["total_emails"]
+        avg_tokens = summary["total_tokens"] // summary["total_emails"]
+        lines.append(f"\n📊 <b>Média por email:</b>")
+        lines.append(f"   Tokens: {avg_tokens:,}")
+        lines.append(f"   Custo: ${avg_cost:.4f}")
+
+    if summary["daily"]:
+        lines.append(f"\n📅 <b>Por dia:</b>")
+        for d in summary["daily"][:14]:  # max 14 days in message
+            lines.append(f"  {d['date']} │ {d['emails']} emails │ {d['tokens']:,} tk │ ${d['cost_usd']:.4f}")
+
+    await tg.send_text(chat_id, "\n".join(lines), thread_id=thread_id)
 
 
 async def handle_config_response(message: dict, pending: dict, services: dict):

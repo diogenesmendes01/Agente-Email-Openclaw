@@ -371,7 +371,7 @@ async def telegram_callback(request: Request):
 
         _settings = get_settings()
         services = {"db": db, "gmail": gmail, "telegram": telegram, "llm": llm,
-                     "allowed_user_ids": _settings.telegram_allowed_user_ids}
+                     "metrics": metrics, "allowed_user_ids": _settings.telegram_allowed_user_ids}
 
         callback_query = body.get("callback_query")
         if callback_query:
@@ -404,6 +404,26 @@ async def test_webhook(request: Request):
     logger.info(f"TESTE: Processando email {email_id}")
     result = await processor.process_email(email_id, account)
     return JSONResponse(content=result)
+
+
+@app.get("/costs")
+async def get_costs(account: str, days: int = 7):
+    """Relatório de custos API por dia.
+
+    Params:
+        account: email da conta (ex: diogenes.mendes01@gmail.com)
+        days: quantidade de dias (default 7, max 90)
+    """
+    if not metrics:
+        raise HTTPException(status_code=503, detail="Metrics service not available")
+
+    days = min(max(days, 1), 90)
+    account_data = await db.get_account(account)
+    if not account_data:
+        raise HTTPException(status_code=404, detail=f"Account {account} not found")
+
+    summary = await metrics.get_cost_summary(account_data["id"], days)
+    return JSONResponse(content=summary)
 
 
 def _is_duplicate(email_id: str) -> bool:

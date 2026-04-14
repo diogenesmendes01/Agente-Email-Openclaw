@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS metrics (
     service VARCHAR(30),
     latency_ms INT,
     tokens_used INT,
+    cost_usd NUMERIC(10,6) DEFAULT 0,
     success BOOLEAN DEFAULT true,
     error_message TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
@@ -93,6 +94,7 @@ CREATE TABLE IF NOT EXISTS metrics (
 
 CREATE INDEX IF NOT EXISTS idx_metrics_created ON metrics(created_at);
 CREATE INDEX IF NOT EXISTS idx_metrics_event ON metrics(event);
+CREATE INDEX IF NOT EXISTS idx_metrics_account_created ON metrics(account_id, created_at);
 
 CREATE TABLE IF NOT EXISTS failed_jobs (
     id SERIAL PRIMARY KEY,

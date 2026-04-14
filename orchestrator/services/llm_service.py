@@ -17,6 +17,18 @@ logger = logging.getLogger(__name__)
 class LLMService:
     """Serviço para interagir com LLM via OpenRouter e OpenAI"""
 
+    # Preços por 1M tokens (USD) — OpenRouter pricing
+    # Atualizar conforme necessário: https://openrouter.ai/models
+    MODEL_PRICING = {
+        "z-ai/glm-5-turbo": {"prompt": 0.014, "completion": 0.014},
+        "google/gemini-2.0-flash-001": {"prompt": 0.10, "completion": 0.40},
+        "google/gemini-2.5-flash-preview": {"prompt": 0.15, "completion": 0.60},
+        "google/gemini-2.5-pro-preview": {"prompt": 1.25, "completion": 10.0},
+        "openai/gpt-4o-mini": {"prompt": 0.15, "completion": 0.60},
+        "openai/gpt-4o": {"prompt": 2.50, "completion": 10.0},
+        "anthropic/claude-sonnet-4": {"prompt": 3.0, "completion": 15.0},
+    }
+
     def __init__(self):
         self.openrouter_key = os.getenv("OPENROUTER_API_KEY")
         self.openai_key = os.getenv("OPENAI_API_KEY")
@@ -34,6 +46,18 @@ class LLMService:
             logger.info(f"LLMService configurado com modelo {self.model}")
         else:
             logger.warning("LLMService não configurado - chaves não encontradas")
+
+    def _calculate_cost(self, prompt_tokens: int, completion_tokens: int) -> float:
+        """Calcula custo em USD baseado no modelo e tokens usados"""
+        pricing = self.MODEL_PRICING.get(self.model)
+        if not pricing:
+            # Fallback: estimar preço genérico barato
+            pricing = {"prompt": 0.10, "completion": 0.40}
+        cost = (
+            (prompt_tokens / 1_000_000) * pricing["prompt"]
+            + (completion_tokens / 1_000_000) * pricing["completion"]
+        )
+        return round(cost, 6)
     
     def is_configured(self) -> bool:
         return self._configured
@@ -49,8 +73,11 @@ class LLMService:
         
         if response:
             result = self._parse_classification(response.get("content", ""))
-            result["reasoning_tokens"] = response.get("reasoning_tokens", 0)
+            result["prompt_tokens"] = response.get("prompt_tokens", 0)
+            result["completion_tokens"] = response.get("completion_tokens", 0)
             result["total_tokens"] = response.get("total_tokens", 0)
+            result["reasoning_tokens"] = response.get("reasoning_tokens", 0)
+            result["cost_usd"] = response.get("cost_usd", 0.0)
             return result
         
         return self._default_classification()
@@ -67,8 +94,11 @@ class LLMService:
 
         if response:
             result = self._parse_summary(response.get("content", ""))
-            result["reasoning_tokens"] = response.get("reasoning_tokens", 0)
+            result["prompt_tokens"] = response.get("prompt_tokens", 0)
+            result["completion_tokens"] = response.get("completion_tokens", 0)
             result["total_tokens"] = response.get("total_tokens", 0)
+            result["reasoning_tokens"] = response.get("reasoning_tokens", 0)
+            result["cost_usd"] = response.get("cost_usd", 0.0)
             return result
 
         return {"resumo": "Erro ao gerar resumo", "entidades": {}, "prazo": None}
@@ -88,8 +118,11 @@ class LLMService:
 
         if response:
             result = self._parse_action(response.get("content", ""))
-            result["reasoning_tokens"] = response.get("reasoning_tokens", 0)
+            result["prompt_tokens"] = response.get("prompt_tokens", 0)
+            result["completion_tokens"] = response.get("completion_tokens", 0)
             result["total_tokens"] = response.get("total_tokens", 0)
+            result["reasoning_tokens"] = response.get("reasoning_tokens", 0)
+            result["cost_usd"] = response.get("cost_usd", 0.0)
             return result
 
         return {"acao": "notificar", "justificativa": "Erro ao decidir"}
@@ -161,14 +194,29 @@ class LLMService:
                     content = msg.get("content") or msg.get("reasoning")
 
                     usage = data.get("usage", {})
+                    prompt_tokens = usage.get("prompt_tokens", 0)
+                    completion_tokens = usage.get("completion_tokens", 0)
+                    total_tokens = usage.get("total_tokens", 0)
+
+                    # Reasoning tokens (modelos com thinking — ex: o1, o3)
                     details = usage.get("completion_tokens_details") or {}
                     reasoning_tokens = details.get("reasoning_tokens", 0)
-                    total_tokens = usage.get("total_tokens", 0)
+
+                    cost_usd = self._calculate_cost(prompt_tokens, completion_tokens)
+
+                    logger.info(
+                        f"LLM usage: model={self.model} "
+                        f"prompt={prompt_tokens} completion={completion_tokens} "
+                        f"total={total_tokens} cost=${cost_usd:.6f}"
+                    )
 
                     return {
                         "content": content,
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": total_tokens,
                         "reasoning_tokens": reasoning_tokens,
-                        "total_tokens": total_tokens
+                        "cost_usd": cost_usd,
                     }
                 elif response.status_code == 429:
                     logger.warning("Rate limited pelo OpenRouter, tentando novamente...")

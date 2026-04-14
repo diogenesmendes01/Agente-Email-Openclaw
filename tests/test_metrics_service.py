@@ -30,11 +30,11 @@ class TestMetricsService:
         async with ms.track("llm_call", service="llm", account_id=1) as t:
             t.tokens_used = 200
         conn.execute.assert_called_once()
-        # Args: (sql, request_id, account_id, event, service, latency_ms, tokens_used, success, error_message)
+        # Args: (sql, request_id, account_id, event, service, latency_ms, tokens_used, cost_usd, success, error_message)
         args = conn.execute.call_args.args
         assert args[5] > 0       # latency_ms > 0
         assert args[6] == 200    # tokens_used
-        assert args[7] is True   # success
+        assert args[8] is True   # success
 
     @pytest.mark.asyncio
     async def test_track_records_failure(self, mock_pool):
@@ -48,10 +48,10 @@ class TestMetricsService:
         except ValueError:
             pass
         conn.execute.assert_called_once()
-        # Args: (sql, request_id, account_id, event, service, latency_ms, tokens_used, success, error_message)
+        # Args: (sql, request_id, account_id, event, service, latency_ms, tokens_used, cost_usd, success, error_message)
         args = conn.execute.call_args.args
-        assert args[7] is False           # success = False
-        assert "test error" in args[8]    # error_message
+        assert args[8] is False           # success = False
+        assert "test error" in args[9]    # error_message
 
     @pytest.mark.asyncio
     async def test_cleanup_old_metrics(self, mock_pool):

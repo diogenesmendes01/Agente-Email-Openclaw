@@ -63,9 +63,12 @@ class TelegramService:
         summary: Dict[str, Any],
         action: Dict[str, Any],
         topic_id: Optional[int] = 11,
-        reasoning_tokens: int = 0,
+        total_tokens: int = 0,
+        cost_usd: float = 0.0,
         account: str = "",
         auto_responded: bool = False,
+        # Legacy parameter (ignored, kept for backwards compat)
+        reasoning_tokens: int = 0,
     ) -> Optional[int]:
         """Envia notificação formatada. Mensagens longas são divididas."""
 
@@ -73,7 +76,7 @@ class TelegramService:
             logger.warning("Telegram não configurado")
             return None
 
-        text = self._format_message(email, classification, summary, action, reasoning_tokens)
+        text = self._format_message(email, classification, summary, action, total_tokens, cost_usd)
         if auto_responded:
             text += "\n\n✅ <b>Auto-respondido via playbook</b>"
         reply_markup = self._create_keyboard(email, account, auto_responded=auto_responded)
@@ -162,7 +165,8 @@ class TelegramService:
         classification: Dict[str, Any],
         summary: Dict[str, Any],
         action: Dict[str, Any],
-        reasoning_tokens: int = 0
+        total_tokens: int = 0,
+        cost_usd: float = 0.0,
     ) -> str:
         """Formata mensagem seguindo o padrão do guia"""
         
@@ -238,12 +242,17 @@ class TelegramService:
         # Rodapé
         lines.append("")
         if date_str:
-            # Converter reasoning_tokens para formato legível
-            if reasoning_tokens > 1000:
-                reasoning_str = f"{reasoning_tokens / 1000:.1f}k"
+            # Formato tokens legível
+            if total_tokens > 1000:
+                tokens_str = f"{total_tokens / 1000:.1f}k"
             else:
-                reasoning_str = str(reasoning_tokens)
-            lines.append(f"🕐 {date_str[:16]} │ ⚙️ reasoning: {reasoning_str} tokens")
+                tokens_str = str(total_tokens)
+            # Formato custo legível
+            if cost_usd > 0:
+                cost_str = f"${cost_usd:.4f}"
+            else:
+                cost_str = "$0"
+            lines.append(f"🕐 {date_str[:16]} │ ⚙️ {tokens_str} tokens │ 💰 {cost_str}")
         
         return "\n".join(lines)
     

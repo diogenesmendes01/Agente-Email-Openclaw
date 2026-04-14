@@ -287,7 +287,28 @@ class EmailProcessor:
             await self._execute_action(action, email, account)
             
             # 9. Notificar Telegram
-            # Calcular total de reasoning tokens
+            # Calcular totais de tokens e custo das 3 chamadas LLM
+            total_prompt_tokens = (
+                classification.get("prompt_tokens", 0) +
+                summary.get("prompt_tokens", 0) +
+                action.get("prompt_tokens", 0)
+            )
+            total_completion_tokens = (
+                classification.get("completion_tokens", 0) +
+                summary.get("completion_tokens", 0) +
+                action.get("completion_tokens", 0)
+            )
+            total_tokens = (
+                classification.get("total_tokens", 0) +
+                summary.get("total_tokens", 0) +
+                action.get("total_tokens", 0)
+            )
+            total_cost_usd = (
+                classification.get("cost_usd", 0.0) +
+                summary.get("cost_usd", 0.0) +
+                action.get("cost_usd", 0.0)
+            )
+            # Legacy field (keep for backwards compat)
             total_reasoning_tokens = (
                 classification.get("reasoning_tokens", 0) +
                 summary.get("reasoning_tokens", 0) +
@@ -302,12 +323,14 @@ class EmailProcessor:
                 summary=summary,
                 action=action,
                 topic_id=topic_id,
-                reasoning_tokens=total_reasoning_tokens,
+                total_tokens=total_tokens,
+                cost_usd=total_cost_usd,
                 account=account,
                 auto_responded=auto_responded,
             )
             result["telegram_message_id"] = message_id
-            result["reasoning_tokens"] = total_reasoning_tokens
+            result["total_tokens"] = total_tokens
+            result["cost_usd"] = total_cost_usd
             
             # Lazy-load counter from database on first successful email
             if not self._counter_loaded and account_id:
@@ -334,7 +357,8 @@ class EmailProcessor:
                     event="email_processed",
                     service="pipeline",
                     account_id=account_id,
-                    tokens_used=total_reasoning_tokens,
+                    tokens_used=total_tokens,
+                    cost_usd=total_cost_usd,
                     success=True,
                 )
 
