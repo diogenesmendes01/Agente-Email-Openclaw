@@ -66,12 +66,26 @@ def authenticate(account: str):
         creds.refresh(Request())
     else:
         print(f"Iniciando autorizacao OAuth para {account}...")
-        print("O navegador vai abrir para voce autorizar o acesso.")
         print(f"IMPORTANTE: Faca login com a conta {account}")
         print()
 
         flow = InstalledAppFlow.from_client_secrets_file(str(client_secret), SCOPES)
-        creds = flow.run_local_server(port=0)
+
+        # Try local server first (works on machines with a browser).
+        # Fall back to manual copy-paste flow for headless servers (VPS).
+        try:
+            creds = flow.run_local_server(port=0)
+        except Exception:
+            print("Navegador nao disponivel — usando modo manual.")
+            print()
+            auth_url, _ = flow.authorization_url(prompt="consent")
+            print("Abra este link no navegador do seu PC:")
+            print()
+            print(f"  {auth_url}")
+            print()
+            code = input("Cole o codigo de autorizacao aqui: ").strip()
+            flow.fetch_token(code=code)
+            creds = flow.credentials
 
     # Salvar token
     with open(token_file, "w") as f:
