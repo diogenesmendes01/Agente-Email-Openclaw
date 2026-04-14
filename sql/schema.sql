@@ -1,7 +1,7 @@
 -- sql/schema.sql
 -- Email Agent Platform — PostgreSQL Schema
 
-CREATE TABLE accounts (
+CREATE TABLE IF NOT EXISTS accounts (
     id SERIAL PRIMARY KEY,
     email VARCHAR(255) UNIQUE NOT NULL,
     hook_token_env VARCHAR(100) NOT NULL,
@@ -11,7 +11,7 @@ CREATE TABLE accounts (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE vip_list (
+CREATE TABLE IF NOT EXISTS vip_list (
     id SERIAL PRIMARY KEY,
     account_id INT REFERENCES accounts(id) ON DELETE CASCADE,
     sender_email VARCHAR(255) NOT NULL,
@@ -21,7 +21,7 @@ CREATE TABLE vip_list (
     UNIQUE(account_id, sender_email)
 );
 
-CREATE TABLE blacklist (
+CREATE TABLE IF NOT EXISTS blacklist (
     id SERIAL PRIMARY KEY,
     account_id INT REFERENCES accounts(id) ON DELETE CASCADE,
     sender_email VARCHAR(255) NOT NULL,
@@ -30,7 +30,7 @@ CREATE TABLE blacklist (
     UNIQUE(account_id, sender_email)
 );
 
-CREATE TABLE feedback (
+CREATE TABLE IF NOT EXISTS feedback (
     id SERIAL PRIMARY KEY,
     account_id INT REFERENCES accounts(id) ON DELETE CASCADE,
     email_id VARCHAR(100) NOT NULL,
@@ -41,7 +41,7 @@ CREATE TABLE feedback (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE decisions (
+CREATE TABLE IF NOT EXISTS decisions (
     id SERIAL PRIMARY KEY,
     account_id INT REFERENCES accounts(id) ON DELETE CASCADE,
     email_id VARCHAR(100) NOT NULL,
@@ -56,7 +56,7 @@ CREATE TABLE decisions (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE tasks (
+CREATE TABLE IF NOT EXISTS tasks (
     id SERIAL PRIMARY KEY,
     account_id INT REFERENCES accounts(id) ON DELETE CASCADE,
     email_id VARCHAR(100),
@@ -66,7 +66,7 @@ CREATE TABLE tasks (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE history_ids (
+CREATE TABLE IF NOT EXISTS history_ids (
     account_id INT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
     history_id VARCHAR(50) NOT NULL,
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -76,7 +76,7 @@ CREATE TABLE history_ids (
 -- complete and Phase 2 only needs ALTER/migration, not a second init script.
 -- If Phase 2 design changes, update this file before deploying Phase 2.)
 
-CREATE TABLE metrics (
+CREATE TABLE IF NOT EXISTS metrics (
     id SERIAL PRIMARY KEY,
     request_id VARCHAR(8),
     account_id INT REFERENCES accounts(id),
@@ -89,10 +89,10 @@ CREATE TABLE metrics (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_metrics_created ON metrics(created_at);
-CREATE INDEX idx_metrics_event ON metrics(event);
+CREATE INDEX IF NOT EXISTS idx_metrics_created ON metrics(created_at);
+CREATE INDEX IF NOT EXISTS idx_metrics_event ON metrics(event);
 
-CREATE TABLE failed_jobs (
+CREATE TABLE IF NOT EXISTS failed_jobs (
     id SERIAL PRIMARY KEY,
     account_id INT REFERENCES accounts(id),
     job_type VARCHAR(50) NOT NULL,
@@ -105,11 +105,11 @@ CREATE TABLE failed_jobs (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_failed_jobs_status ON failed_jobs(status, next_retry_at);
+CREATE INDEX IF NOT EXISTS idx_failed_jobs_status ON failed_jobs(status, next_retry_at);
 
 -- Phase 3: Pending Actions (replaces pending_actions.json and pending_replies.json)
 
-CREATE TABLE pending_actions (
+CREATE TABLE IF NOT EXISTS pending_actions (
     id SERIAL PRIMARY KEY,
     account_id INT REFERENCES accounts(id),
     email_id VARCHAR(100) NOT NULL,
@@ -123,12 +123,12 @@ CREATE TABLE pending_actions (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_pending_email ON pending_actions(email_id);
-CREATE INDEX idx_pending_expires ON pending_actions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_pending_email ON pending_actions(email_id);
+CREATE INDEX IF NOT EXISTS idx_pending_expires ON pending_actions(expires_at);
 
 -- Phase 4: Playbooks Multi-Empresa
 
-CREATE TABLE company_profiles (
+CREATE TABLE IF NOT EXISTS company_profiles (
     id SERIAL PRIMARY KEY,
     account_id INT UNIQUE REFERENCES accounts(id) ON DELETE CASCADE,
     company_name VARCHAR(255) NOT NULL,
@@ -141,7 +141,7 @@ CREATE TABLE company_profiles (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE clients (
+CREATE TABLE IF NOT EXISTS clients (
     id SERIAL PRIMARY KEY,
     company_id INT REFERENCES company_profiles(id) ON DELETE CASCADE,
     name VARCHAR(255) NOT NULL,
@@ -152,7 +152,7 @@ CREATE TABLE clients (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE domain_rules (
+CREATE TABLE IF NOT EXISTS domain_rules (
     id SERIAL PRIMARY KEY,
     company_id INT REFERENCES company_profiles(id) ON DELETE CASCADE,
     domain VARCHAR(255) NOT NULL,
@@ -163,7 +163,7 @@ CREATE TABLE domain_rules (
     UNIQUE(company_id, domain)
 );
 
-CREATE TABLE playbooks (
+CREATE TABLE IF NOT EXISTS playbooks (
     id SERIAL PRIMARY KEY,
     company_id INT REFERENCES company_profiles(id) ON DELETE CASCADE,
     trigger_description TEXT NOT NULL,
