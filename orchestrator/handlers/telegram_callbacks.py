@@ -14,6 +14,15 @@ logger = logging.getLogger(__name__)
 # while send_custom_draft (from custom_reply flow) has its own handler above.
 CONFIRM_ACTIONS = {"archive", "vip", "silence", "spam", "send_draft"}
 
+# Loading indicators per action type
+_ACTION_LOADING = {
+    "archive": "📦 Arquivando...",
+    "vip": "⭐ Adicionando VIP...",
+    "silence": "🔇 Silenciando...",
+    "spam": "🗑️ Marcando spam...",
+    "send_draft": "✉️ Enviando rascunho...",
+}
+
 
 def _extract_sender(text: str) -> str:
     """Extract sender email from message text."""
@@ -183,10 +192,16 @@ async def handle_callback(callback_query: dict, services: dict):
         await tg.answer_callback(callback_id, "✉️ Enviando...")
         pending = await db.get_pending_action(email_id, "custom_reply", actor_id=actor_id, topic_id=topic_id)
         if pending:
-            ctx = _build_ctx(email_id, "", actor_id, chat_id, message_id, text, services, pending=pending, topic_id=topic_id)
-            status = await reply.send_draft(ctx)
             state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
             original_text = state.get("original_text", text)
+            # Show loading indicator immediately
+            loading_text = f"{original_text}\n\n───\n✉️ Enviando rascunho..."
+            await tg.edit_message(
+                pending.get("message_id", message_id), loading_text,
+                chat_id=str(chat_id), reply_markup={"inline_keyboard": []}
+            )
+            ctx = _build_ctx(email_id, "", actor_id, chat_id, message_id, text, services, pending=pending, topic_id=topic_id)
+            status = await reply.send_draft(ctx)
             await _mark_done(tg, chat_id, pending.get("message_id", message_id), status, original_text)
         return
 
@@ -213,14 +228,21 @@ async def handle_callback(callback_query: dict, services: dict):
         pending = await db.get_pending_action(email_id, real_action, actor_id=actor_id, topic_id=topic_id)
         if not pending:
             return
+        state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
+        original_text = state.get("original_text", text)
+        # Show loading indicator immediately
+        loading_msg = _ACTION_LOADING.get(real_action, "⏳ Processando...")
+        loading_text = f"{original_text}\n\n───\n{loading_msg}"
+        await tg.edit_message(
+            pending.get("message_id", message_id), loading_text,
+            chat_id=str(chat_id), reply_markup={"inline_keyboard": []}
+        )
         ctx = _build_ctx(email_id, account, actor_id, chat_id, message_id, text, services, pending=pending, topic_id=topic_id)
         action_fn = _get_action_fn(real_action)
         if action_fn:
             status = await action_fn(ctx)
         else:
             status = "❌ Ação desconhecida"
-        state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
-        original_text = state.get("original_text", text)
         await _mark_done(tg, chat_id, pending.get("message_id", message_id), status, original_text)
         await db.delete_pending_action(pending["id"])
         return
