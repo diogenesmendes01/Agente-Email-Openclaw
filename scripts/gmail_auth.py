@@ -17,8 +17,10 @@ O script abre o navegador para autorizar o acesso e salva o token em:
 
 import os
 import sys
+import shutil
 import argparse
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 # Adicionar raiz do projeto ao path
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -69,21 +71,43 @@ def authenticate(account: str):
         print(f"IMPORTANTE: Faca login com a conta {account}")
         print()
 
-        flow = InstalledAppFlow.from_client_secrets_file(str(client_secret), SCOPES)
+        has_browser = shutil.which("xdg-open") or shutil.which("open") or os.environ.get("DISPLAY")
 
-        # Try local server first (works on machines with a browser).
-        # Fall back to manual copy-paste flow for headless servers (VPS).
-        try:
-            creds = flow.run_local_server(port=0)
-        except Exception:
-            print("Navegador nao disponivel — usando modo manual.")
-            print()
-            auth_url, _ = flow.authorization_url(prompt="consent")
+        if has_browser:
+            flow = InstalledAppFlow.from_client_secrets_file(str(client_secret), SCOPES)
+            try:
+                creds = flow.run_local_server(port=0)
+            except Exception:
+                has_browser = False  # fall through to manual mode
+
+        if not has_browser:
+            # Headless mode: use http://localhost as redirect_uri.
+            # The browser will redirect there (won't load), but the URL
+            # in the address bar contains the authorization code.
+            flow = InstalledAppFlow.from_client_secrets_file(
+                str(client_secret), SCOPES,
+                redirect_uri="http://localhost",
+            )
+            auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
             print("Abra este link no navegador do seu PC:")
             print()
             print(f"  {auth_url}")
             print()
-            code = input("Cole o codigo de autorizacao aqui: ").strip()
+            print('Apos autorizar, o navegador vai redirecionar para uma pagina que NAO vai carregar.')
+            print('Isso e normal! Copie a URL inteira da barra de endereco e cole aqui.')
+            print()
+            response = input("Cole a URL ou codigo aqui: ").strip()
+
+            # Accept either the full redirect URL or just the code
+            if response.startswith("http"):
+                parsed = parse_qs(urlparse(response).query)
+                code = parsed.get("code", [""])[0]
+                if not code:
+                    print("ERRO: Nao foi possivel extrair o codigo da URL.")
+                    sys.exit(1)
+            else:
+                code = response
+
             flow.fetch_token(code=code)
             creds = flow.credentials
 
