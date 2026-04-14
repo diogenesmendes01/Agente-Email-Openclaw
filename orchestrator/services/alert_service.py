@@ -48,8 +48,8 @@ class AlertService:
                         "parse_mode": "Markdown",
                     },
                 )
-            self._last_sent[alert_type] = now
             if resp.status_code == 200:
+                self._last_sent[alert_type] = now
                 logger.info(f"Alert sent: {alert_type}")
                 return True
             else:
