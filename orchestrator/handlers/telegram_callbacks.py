@@ -44,31 +44,43 @@ def _extract_urgency(text: str) -> str:
     return "medium"
 
 
-def _build_original_keyboard(email_id: str, account: str) -> dict:
-    """Rebuild the original inline keyboard."""
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "✉️ Enviar rascunho", "callback_data": f"send_draft:{email_id}:{account}"},
-                {"text": "📝 Criar tarefa", "callback_data": f"create_task:{email_id}:{account}"},
-            ],
-            [
-                {"text": "✅ Arquivar", "callback_data": f"archive:{email_id}:{account}"},
-                {"text": "⭐ Marcar VIP", "callback_data": f"vip:{email_id}:{account}"},
-            ],
-            [
-                {"text": "💬 Responder custom", "callback_data": f"custom_reply:{email_id}:{account}"},
-                {"text": "🔄 Reclassificar", "callback_data": f"reclassify:{email_id}:{account}"},
-            ],
-            [
-                {"text": "🔇 Silenciar", "callback_data": f"silence:{email_id}:{account}"},
-                {"text": "🗑️ Spam", "callback_data": f"spam:{email_id}:{account}"},
-            ],
-            [
-                {"text": "🔗 Abrir no Gmail", "url": f"https://mail.google.com/mail/u/0/#inbox/{email_id}"},
-            ],
-        ]
-    }
+def _build_original_keyboard(email_id: str, account: str, auto_responded: bool = False) -> dict:
+    """Rebuild the original inline keyboard.
+
+    When auto_responded=True, reply/draft buttons are omitted to match the
+    keyboard that was originally shown for auto-responded emails.
+    """
+    keyboard = []
+    if not auto_responded:
+        keyboard.append([
+            {"text": "✉️ Enviar rascunho", "callback_data": f"send_draft:{email_id}:{account}"},
+            {"text": "📝 Criar tarefa", "callback_data": f"create_task:{email_id}:{account}"},
+        ])
+        keyboard.append([
+            {"text": "✅ Arquivar", "callback_data": f"archive:{email_id}:{account}"},
+            {"text": "⭐ Marcar VIP", "callback_data": f"vip:{email_id}:{account}"},
+        ])
+        keyboard.append([
+            {"text": "💬 Responder custom", "callback_data": f"custom_reply:{email_id}:{account}"},
+            {"text": "🔄 Reclassificar", "callback_data": f"reclassify:{email_id}:{account}"},
+        ])
+        keyboard.append([
+            {"text": "🔇 Silenciar", "callback_data": f"silence:{email_id}:{account}"},
+            {"text": "🗑️ Spam", "callback_data": f"spam:{email_id}:{account}"},
+        ])
+    else:
+        keyboard.append([
+            {"text": "✅ Arquivar", "callback_data": f"archive:{email_id}:{account}"},
+            {"text": "📝 Criar tarefa", "callback_data": f"create_task:{email_id}:{account}"},
+        ])
+        keyboard.append([
+            {"text": "⭐ Marcar VIP", "callback_data": f"vip:{email_id}:{account}"},
+            {"text": "🔄 Reclassificar", "callback_data": f"reclassify:{email_id}:{account}"},
+        ])
+    keyboard.append([
+        {"text": "🔗 Abrir no Gmail", "url": f"https://mail.google.com/mail/u/0/#inbox/{email_id}"},
+    ])
+    return {"inline_keyboard": keyboard}
 
 
 def _confirmation_text(action: str, sender: str) -> str:
@@ -149,7 +161,9 @@ async def handle_callback(callback_query: dict, services: dict):
         if pending:
             state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
             account = state.get("account", "")
-            await tg.edit_reply_markup(chat_id, message_id, _build_original_keyboard(email_id, account))
+            original_text = state.get("original_text", text)
+            was_auto = "Auto-respondido via playbook" in original_text
+            await tg.edit_reply_markup(chat_id, message_id, _build_original_keyboard(email_id, account, auto_responded=was_auto))
             await db.delete_pending_action(pending["id"])
         return
 
@@ -220,8 +234,9 @@ async def handle_callback(callback_query: dict, services: dict):
             state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
             original_text = state.get("original_text", text)
             cancel_account = state.get("account", account)
+            was_auto = "Auto-respondido via playbook" in original_text
             await tg.edit_message(message_id, original_text, chat_id=str(chat_id),
-                                  reply_markup=_build_original_keyboard(email_id, cancel_account))
+                                  reply_markup=_build_original_keyboard(email_id, cancel_account, auto_responded=was_auto))
             await db.delete_pending_action(pending["id"])
         return
 
