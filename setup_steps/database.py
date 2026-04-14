@@ -47,41 +47,50 @@ def run(project_dir: Path, env: dict) -> bool:
     parts = parse_database_url(database_url)
     target_db = parts["dbname"]
 
-    # 1. Connect to 'postgres' to check/create target database
+    # 1. Try connecting directly to the target database first
+    conn = None
     try:
-        with spinner("Conectando ao PostgreSQL..."):
-            admin_conn = psycopg2.connect(
-                host=parts["host"], port=parts["port"],
-                user=parts["user"], password=parts["password"],
-                dbname="postgres",
-            )
-            admin_conn.autocommit = True
-        success(f"Conectado ao PostgreSQL em {parts['host']}:{parts['port']}")
-    except Exception as e:
-        error(f"Falha ao conectar: {e}")
-        return False
+        with spinner(f"Conectando ao banco '{target_db}'..."):
+            conn = psycopg2.connect(database_url)
+            conn.autocommit = True
+        success(f"Conectado ao banco '{target_db}' em {parts['host']}:{parts['port']}")
+    except psycopg2.OperationalError:
+        # Target DB may not exist yet — try creating it via admin connection
+        warning(f"Banco '{target_db}' não acessível — tentando criar...")
+        try:
+            with spinner("Conectando ao PostgreSQL (admin)..."):
+                admin_conn = psycopg2.connect(
+                    host=parts["host"], port=parts["port"],
+                    user=parts["user"], password=parts["password"],
+                    dbname="postgres",
+                )
+                admin_conn.autocommit = True
+        except Exception as e:
+            error(f"Falha ao conectar ao PostgreSQL: {e}")
+            error("Dica: verifique se o usuário tem acesso ao banco 'postgres' ou se o banco alvo já existe.")
+            return False
 
-    try:
-        if not check_database_exists(admin_conn, target_db):
-            with spinner(f"Criando banco '{target_db}'..."):
-                with admin_conn.cursor() as cur:
-                    cur.execute(f'CREATE DATABASE "{target_db}"')
-            success(f"Banco '{target_db}' criado")
-        else:
-            success(f"Banco '{target_db}' já existe")
-    except Exception as e:
-        error(f"Falha ao criar banco: {e}")
-        return False
-    finally:
-        admin_conn.close()
+        try:
+            if not check_database_exists(admin_conn, target_db):
+                with spinner(f"Criando banco '{target_db}'..."):
+                    with admin_conn.cursor() as cur:
+                        cur.execute(f'CREATE DATABASE "{target_db}"')
+                success(f"Banco '{target_db}' criado")
+            else:
+                success(f"Banco '{target_db}' já existe")
+        except Exception as e:
+            error(f"Falha ao criar banco: {e}")
+            return False
+        finally:
+            admin_conn.close()
 
-    # 2. Connect to target database and run schema
-    try:
-        conn = psycopg2.connect(database_url)
-        conn.autocommit = True
-    except Exception as e:
-        error(f"Falha ao conectar ao banco '{target_db}': {e}")
-        return False
+        # Now connect to the newly created target DB
+        try:
+            conn = psycopg2.connect(database_url)
+            conn.autocommit = True
+        except Exception as e:
+            error(f"Falha ao conectar ao banco '{target_db}': {e}")
+            return False
 
     try:
         schema_file = project_dir / "sql" / "schema.sql"

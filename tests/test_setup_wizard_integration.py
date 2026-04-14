@@ -50,6 +50,21 @@ class TestEnvRoundTrip:
         assert loaded["GMAIL_ACCOUNT_1"] == data["GMAIL_ACCOUNT_1"]
 
 
+class TestBootstrapDeps:
+    """Test that ensure_bootstrap_deps uses correct module names."""
+
+    def test_maps_python_dotenv_to_dotenv(self):
+        """python-dotenv pip package should import as 'dotenv', not 'python_dotenv'."""
+        from setup_wizard import ensure_bootstrap_deps
+        with patch("builtins.__import__", side_effect=lambda name, *a, **kw: None) as mock_import:
+            with patch("subprocess.check_call"):
+                ensure_bootstrap_deps()
+        # Should try importing 'dotenv' (not 'python_dotenv')
+        import_names = [c[0][0] for c in mock_import.call_args_list]
+        assert "dotenv" in import_names
+        assert "python_dotenv" not in import_names
+
+
 class TestValidationDoesNotCrash:
     """Validation should handle missing services gracefully."""
 

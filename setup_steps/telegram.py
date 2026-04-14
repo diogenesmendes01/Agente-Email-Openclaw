@@ -23,15 +23,42 @@ def validate_token(token: str) -> dict | None:
     return None
 
 
-def discover_chat_id(token: str) -> tuple:
-    """Call getUpdates and return (chat_id, title) from most recent message."""
+def _flush_old_updates(token: str):
+    """Flush old updates so discover_chat_id only sees fresh ones."""
     try:
         resp = requests.get(
             f"{TELEGRAM_API.format(token=token)}/getUpdates",
-            params={"limit": 10}, timeout=10,
+            params={"limit": 1, "offset": -1}, timeout=10,
         )
         data = resp.json()
         if data.get("ok") and data["result"]:
+            last_id = data["result"][-1]["update_id"]
+            # Confirm the offset so Telegram drops all older updates
+            requests.get(
+                f"{TELEGRAM_API.format(token=token)}/getUpdates",
+                params={"offset": last_id + 1, "limit": 1}, timeout=10,
+            )
+    except Exception:
+        pass
+
+
+def discover_chat_id(token: str) -> tuple:
+    """Call getUpdates and return (chat_id, title) from the most recent group/supergroup message."""
+    try:
+        resp = requests.get(
+            f"{TELEGRAM_API.format(token=token)}/getUpdates",
+            params={"limit": 20, "timeout": 5}, timeout=15,
+        )
+        data = resp.json()
+        if data.get("ok") and data["result"]:
+            # Prefer group/supergroup chats over private DMs
+            for update in reversed(data["result"]):
+                msg = update.get("message") or update.get("channel_post")
+                if msg and "chat" in msg:
+                    chat = msg["chat"]
+                    if chat.get("type") in ("group", "supergroup"):
+                        return chat["id"], chat.get("title", "")
+            # Fallback: return any chat found (with warning to user)
             for update in reversed(data["result"]):
                 msg = update.get("message") or update.get("channel_post")
                 if msg and "chat" in msg:
@@ -65,6 +92,8 @@ def run(env: dict) -> bool:
     if not chat_id:
         warning("Chat ID não configurado")
         if confirm("Deseja tentar descobrir automaticamente?"):
+            with spinner("Limpando updates antigos..."):
+                _flush_old_updates(token)
             print("    Envie /start no grupo do bot e pressione Enter...")
             input("    [Enter para continuar]")
             with spinner("Buscando chat_id..."):

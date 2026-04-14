@@ -31,3 +31,18 @@ class TestCountExistingAccounts:
     def test_zero_if_no_accounts(self):
         from setup_steps.gmail import count_existing_accounts
         assert count_existing_accounts({}) == 0
+
+    def test_tolerates_gaps_in_slots(self):
+        """Accounts with gaps (e.g., slot 1 and 3 but not 2) should find max slot."""
+        from setup_steps.gmail import count_existing_accounts
+        env = {
+            "GMAIL_ACCOUNT_1": "a@g.com",
+            "GMAIL_ACCOUNT_3": "c@g.com",
+        }
+        assert count_existing_accounts(env) == 3
+
+    def test_finds_slot_20(self):
+        """Should scan up to slot 20 inclusive."""
+        from setup_steps.gmail import count_existing_accounts
+        env = {"GMAIL_ACCOUNT_20": "z@g.com"}
+        assert count_existing_accounts(env) == 20

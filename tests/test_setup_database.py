@@ -52,3 +52,27 @@ class TestRunSqlFile:
             f.flush()
             run_sql_file(mock_conn, Path(f.name))
         mock_cursor.execute.assert_called_once()
+
+
+class TestRunDirectConnectionFirst:
+    def test_connects_directly_to_target_db(self):
+        """run() should try connecting directly to the target DB before falling back to admin."""
+        from setup_steps.database import run
+        from pathlib import Path
+        import tempfile, os
+
+        tmp = Path(tempfile.mkdtemp())
+        sql_dir = tmp / "sql"
+        sql_dir.mkdir()
+        (sql_dir / "schema.sql").write_text("SELECT 1;")
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        env = {"DATABASE_URL": "postgresql://user:pass@localhost:5432/mydb"}
+        with patch("psycopg2.connect", return_value=mock_conn) as mock_connect:
+            run(tmp, env)
+        # First call should be the direct connection to the target DB
+        mock_connect.assert_any_call("postgresql://user:pass@localhost:5432/mydb")

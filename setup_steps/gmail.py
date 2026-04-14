@@ -16,14 +16,12 @@ def check_client_secret(project_dir: Path) -> bool:
 
 
 def count_existing_accounts(env: dict) -> int:
-    """Count existing GMAIL_ACCOUNT_N entries in env."""
-    count = 0
-    for i in range(1, 20):
+    """Count existing GMAIL_ACCOUNT_N entries in env (scans all 20 slots, tolerates gaps)."""
+    max_slot = 0
+    for i in range(1, 21):
         if env.get(f"GMAIL_ACCOUNT_{i}"):
-            count = i
-        else:
-            break
-    return count
+            max_slot = i
+    return max_slot
 
 
 def add_account(project_dir: Path, env: dict, account_num: int) -> dict | None:

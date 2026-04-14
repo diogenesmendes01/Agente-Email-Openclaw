@@ -17,12 +17,14 @@ PROJECT_DIR = Path(__file__).resolve().parent
 
 def ensure_bootstrap_deps():
     """Install rich and python-dotenv before anything else."""
-    for pkg in ["rich", "python-dotenv"]:
+    # Map: pip package name → actual Python module name
+    bootstrap_pkgs = {"rich": "rich", "python-dotenv": "dotenv"}
+    for pip_name, module_name in bootstrap_pkgs.items():
         try:
-            __import__(pkg.replace("-", "_"))
+            __import__(module_name)
         except ImportError:
             subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", pkg, "-q"],
+                [sys.executable, "-m", "pip", "install", pip_name, "-q"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
 
@@ -206,35 +208,28 @@ def run_validation(env: dict):
     except Exception as e:
         error(f"Telegram — {e}")
 
-    # Gmail tokens
+    # Gmail tokens + Watch (scan all 20 slots, tolerate gaps)
+    import time
     creds_dir = PROJECT_DIR / "credentials"
     gmail_count = 0
-    for i in range(1, 20):
+    for i in range(1, 21):
         email = env.get(f"GMAIL_ACCOUNT_{i}", "")
         if not email:
-            break
+            continue
         token_file = creds_dir / f"token_{email}.json"
         if token_file.exists():
             success(f"Gmail — {email} (token encontrado)")
             gmail_count += 1
-        else:
-            error(f"Gmail — {email} (token NÃO encontrado)")
-    if gmail_count == 0:
-        error("Gmail — nenhuma conta configurada")
-
-    # Gmail Watch (token age heuristic)
-    import time
-    for i in range(1, 20):
-        email = env.get(f"GMAIL_ACCOUNT_{i}", "")
-        if not email:
-            break
-        token_file = creds_dir / f"token_{email}.json"
-        if token_file.exists():
+            # Watch age heuristic
             age_days = (time.time() - token_file.stat().st_mtime) / 86400
             if age_days > 7:
                 warning(f"Gmail Watch — {email} token com {int(age_days)} dias (watch expira a cada 7)")
             else:
                 success(f"Gmail Watch — {email} token recente ({int(age_days)}d)")
+        else:
+            error(f"Gmail — {email} (token NÃO encontrado)")
+    if gmail_count == 0:
+        error("Gmail — nenhuma conta configurada")
 
     # Qdrant
     try:

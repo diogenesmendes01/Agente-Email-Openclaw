@@ -65,10 +65,18 @@ def run(project_dir: Path, env: dict, gmail_accounts: list[dict]) -> list[dict]:
         return gmail_accounts
 
     try:
-        topic_id_str = env.get("TELEGRAM_CHAT_ID")
-        topic_id = int(topic_id_str) if topic_id_str else None
-
         for account in gmail_accounts:
+            topic_id = None
+            topic_id_str = ask(
+                f"Telegram Topic ID para {account['email']} (deixe vazio se não usar tópicos)",
+                default="",
+            )
+            if topic_id_str.strip():
+                try:
+                    topic_id = int(topic_id_str.strip())
+                except ValueError:
+                    warning("Valor inválido — salvando sem topic_id")
+
             with spinner(f"Criando conta {account['email']}..."):
                 account_id = create_account(
                     conn, account["email"], account["hook_token_env"], topic_id,
