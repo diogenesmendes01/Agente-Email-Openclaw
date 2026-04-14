@@ -236,12 +236,15 @@ class EmailProcessor:
                             )
                             if response_text:
                                 to_email = email.get("from_email", "") or email.get("from", "")
-                                await self.gmail.send_reply(
+                                sent = await self.gmail.send_reply(
                                     email_id, response_text, account,
                                     to=to_email,
                                 )
-                                auto_responded = True
-                                logger.info(f"[{email_id}] Auto-responded via playbook #{playbook_match['playbook_id']}")
+                                if sent is not False:
+                                    auto_responded = True
+                                    logger.info(f"[{email_id}] Auto-responded via playbook #{playbook_match['playbook_id']}")
+                                else:
+                                    logger.warning(f"[{email_id}] send_reply returned False — not marking as auto-responded")
                 except Exception as e:
                     logger.warning(f"[{email_id}] Playbook check error: {e}")
 

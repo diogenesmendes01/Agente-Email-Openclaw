@@ -32,7 +32,10 @@ class PlaybookService:
             return None
 
         matched_id = match_result.get("matched_id")
-        confidence = match_result.get("confidence", 0.0)
+        try:
+            confidence = float(match_result.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
 
         if not matched_id:
             return None
