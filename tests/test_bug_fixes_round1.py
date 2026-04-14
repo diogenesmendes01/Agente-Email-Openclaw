@@ -363,3 +363,187 @@ async def test_pipeline_auto_responded_marks_notification():
     await proc.process_email("em1", "u@t.com")
     call_kwargs = telegram.send_email_notification.call_args
     assert call_kwargs.kwargs.get("auto_responded") is True
+
+
+# ═══════════════════════════════════════════════════════════════
+# Round 2 review — residual risk tests
+# ═══════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_send_reply_false_keeps_auto_responded_false():
+    """When gmail.send_reply() returns False, auto_responded must stay False."""
+    from orchestrator.handlers.email_processor import EmailProcessor
+    db = AsyncMock()
+    qdrant = MagicMock()
+    qdrant.is_connected.return_value = False
+    llm = AsyncMock()
+    gmail = AsyncMock()
+    telegram = AsyncMock()
+    playbook_svc = AsyncMock()
+
+    proc = EmailProcessor(db, qdrant, llm, gmail, telegram, playbook_service=playbook_svc)
+
+    gmail.get_email.return_value = {
+        "id": "em1", "from": "c@t.com", "from_email": "c@t.com",
+        "from_name": "Client", "subject": "Boleto", "body": "preciso boleto",
+        "body_clean": "", "attachments": [], "threadId": "t1", "date": "2026-04-14",
+    }
+    db.get_account.return_value = {"id": 1}
+    db.get_account_config.return_value = {"vips": [], "telegram_topic": 11}
+    llm.classify_email.return_value = {"prioridade": "Média", "importante": True, "confianca": 0.8, "categoria": "financeiro"}
+    llm.summarize_email.return_value = {"resumo": "Boleto request"}
+    llm.decide_action.return_value = {"acao": "notificar"}
+    telegram.send_email_notification.return_value = 100
+    db.log_decision.return_value = 1
+
+    playbook_svc.match.return_value = {
+        "playbook_id": 1, "template": "...", "trigger": "boleto",
+        "auto_respond": True, "confidence": 0.9,
+        "company": {"company_name": "CW", "tone": "formal", "signature": "Att"},
+    }
+    playbook_svc.generate_response.return_value = "Auto reply text"
+    # Simulate send_reply returning False (send failed silently)
+    gmail.send_reply.return_value = False
+
+    await proc.process_email("em1", "u@t.com")
+    call_kwargs = telegram.send_email_notification.call_args
+    assert call_kwargs.kwargs.get("auto_responded") is False, \
+        "auto_responded should be False when send_reply returns False"
+
+
+def test_cancel_keyboard_respects_auto_responded():
+    """After cancel, _build_original_keyboard must return reduced keyboard for auto-responded emails."""
+    from orchestrator.handlers.telegram_callbacks import _build_original_keyboard
+
+    # Normal email: all buttons present
+    kb_normal = _build_original_keyboard("em1", "a@b.com", auto_responded=False)
+    all_data_normal = [btn.get("callback_data", "") for row in kb_normal["inline_keyboard"] for btn in row]
+    assert any("send_draft" in d for d in all_data_normal), "Normal keyboard should have send_draft"
+    assert any("custom_reply" in d for d in all_data_normal), "Normal keyboard should have custom_reply"
+    assert any("silence" in d for d in all_data_normal), "Normal keyboard should have silence"
+    assert any("spam" in d for d in all_data_normal), "Normal keyboard should have spam"
+
+    # Auto-responded email: reply buttons omitted
+    kb_auto = _build_original_keyboard("em1", "a@b.com", auto_responded=True)
+    all_data_auto = [btn.get("callback_data", "") for row in kb_auto["inline_keyboard"] for btn in row]
+    assert not any("send_draft" in d for d in all_data_auto), "Auto-responded keyboard must omit send_draft"
+    assert not any("custom_reply" in d for d in all_data_auto), "Auto-responded keyboard must omit custom_reply"
+    assert not any("silence" in d for d in all_data_auto), "Auto-responded keyboard must omit silence"
+    assert not any("spam" in d for d in all_data_auto), "Auto-responded keyboard must omit spam"
+    # But should still have archive and reclassify
+    assert any("archive" in d for d in all_data_auto), "Auto-responded keyboard should have archive"
+    assert any("reclassify" in d for d in all_data_auto), "Auto-responded keyboard should have reclassify"
+
+
+@pytest.mark.asyncio
+async def test_cancel_flow_restores_reduced_keyboard_for_auto_responded():
+    """cancel_ flow must detect auto-responded text and restore the reduced keyboard."""
+    from orchestrator.handlers.telegram_callbacks import handle_callback
+
+    db = AsyncMock()
+    tg = AsyncMock()
+    gmail = AsyncMock()
+    llm = AsyncMock()
+
+    original_text = "📧 Email\nDe: x@y.com\n\n✅ <b>Auto-respondido via playbook</b>"
+    db.get_pending_action.return_value = {
+        "id": 1, "message_id": 42,
+        "state": json.dumps({"original_text": original_text, "account": "a@b.com", "sender": "x@y.com"}),
+    }
+    db.delete_pending_action.return_value = None
+
+    callback_query = {
+        "id": "cb1",
+        "data": "cancel_archive:em1:a@b.com",
+        "from": {"id": 123},
+        "message": {
+            "chat": {"id": -100},
+            "message_thread_id": 11,
+            "message_id": 42,
+            "text": "Confirmar?",
+        },
+    }
+    services = {"db": db, "gmail": gmail, "telegram": tg, "llm": llm, "allowed_user_ids": [123]}
+
+    await handle_callback(callback_query, services)
+
+    # Verify edit_message was called with a keyboard that omits reply buttons
+    tg.edit_message.assert_called_once()
+    call_kwargs = tg.edit_message.call_args
+    reply_markup = call_kwargs.kwargs.get("reply_markup") or call_kwargs[1].get("reply_markup")
+    all_data = [btn.get("callback_data", "") for row in reply_markup["inline_keyboard"] for btn in row]
+    assert not any("send_draft" in d for d in all_data), "Reduced keyboard must omit send_draft after cancel"
+    assert not any("custom_reply" in d for d in all_data), "Reduced keyboard must omit custom_reply after cancel"
+
+
+@pytest.mark.asyncio
+async def test_confidence_string_and_invalid_values():
+    """Playbook confidence must handle string numbers and non-numeric strings."""
+    from orchestrator.services.playbook_service import PlaybookService
+
+    db = AsyncMock()
+    llm = AsyncMock()
+    svc = PlaybookService(db, llm)
+
+    db.get_company_profile.return_value = {"id": 1, "company_name": "CW"}
+    db.get_playbooks.return_value = [{"id": 10, "trigger_description": "boleto", "response_template": "t", "auto_respond": True}]
+
+    # Case 1: confidence as string "0.85" — should be accepted (above 0.7)
+    llm.match_playbook.return_value = {"matched_id": 10, "confidence": "0.85"}
+    result = await svc.match(1, "body", "subject")
+    assert result is not None, "String confidence '0.85' should be accepted as valid float"
+    assert result["playbook_id"] == 10
+
+    # Case 2: confidence as non-numeric string "high" — should fallback to 0.0 and be rejected
+    llm.match_playbook.return_value = {"matched_id": 10, "confidence": "high"}
+    result = await svc.match(1, "body", "subject")
+    assert result is None, "Non-numeric confidence 'high' should fallback to 0.0 and be rejected"
+
+    # Case 3: confidence as None — should fallback to 0.0 and be rejected
+    llm.match_playbook.return_value = {"matched_id": 10, "confidence": None}
+    result = await svc.match(1, "body", "subject")
+    assert result is None, "None confidence should fallback to 0.0 and be rejected"
+
+
+def test_webhook_parse_errors_isolated_from_processing():
+    """Webhook must have two separate try/except blocks:
+    1. Parse phase (JSONDecodeError, ValueError) -> 200 bad_request
+    2. Processing phase (Exception) -> 500 error
+
+    KeyError must NOT be caught in the parse phase — it indicates a server bug.
+    """
+    import re
+    main_path = os.path.join(os.path.dirname(__file__), "..", "orchestrator", "main.py")
+    with open(main_path) as f:
+        source = f.read()
+
+    # Extract the telegram_callback function body
+    func_match = re.search(r'async def telegram_callback\(.*?\n(?=@app\.|\nif __name__|$)', source, re.DOTALL)
+    assert func_match, "Could not find telegram_callback function"
+    func_body = func_match.group(0)
+
+    # Parse phase: should catch JSONDecodeError/ValueError right after request.json()
+    # and return 200 before any handle_callback/handle_text_message
+    parse_try = re.search(r'try:\s*\n\s*body = await request\.json\(\)', func_body)
+    assert parse_try, "Parse phase should have 'try: body = await request.json()'"
+
+    parse_except = re.search(r'except\s*\(json\.JSONDecodeError,\s*ValueError\)', func_body)
+    assert parse_except, "Parse phase should catch (json.JSONDecodeError, ValueError) only"
+
+    # Processing phase: separate try block wrapping handle_callback/handle_text_message
+    # The parse except must come BEFORE handle_callback in the source
+    parse_except_pos = parse_except.start()
+    handle_pos = func_body.find("handle_callback")
+    assert parse_except_pos < handle_pos, \
+        "Parse error handler must be before handle_callback — parse and processing must be separate try blocks"
+
+    # KeyError must not appear in the parse-phase except
+    parse_section = func_body[:handle_pos]
+    assert "KeyError" not in parse_section, \
+        "KeyError must NOT be caught in parse phase — it indicates a server bug, not malformed input"
+
+    # Processing phase should catch generic Exception -> 500
+    processing_section = func_body[handle_pos:]
+    assert 'status_code=500' in processing_section, \
+        "Processing errors should return 500 for Telegram retry"
