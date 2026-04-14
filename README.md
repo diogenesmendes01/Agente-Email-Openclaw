@@ -411,6 +411,8 @@ Agente-Email-Openclaw/
 |       +-- pdf_reader.py                    # Extracao de texto de PDFs
 +-- sql/
 |   +-- schema.sql                           # Schema PostgreSQL (13 tabelas)
+|   +-- migrations/
+|       +-- 001_phase3_4_tables.sql          # Migração Phase 3+4 (bancos existentes)
 +-- tests/                                   # 98 testes
 |   +-- conftest.py                          # Fixtures compartilhados
 |   +-- test_database_service.py             # 15 testes
@@ -460,11 +462,21 @@ O banco possui 13 tabelas, criadas automaticamente pelo `sql/schema.sql`:
 | `history_ids` | Controle de history IDs do Gmail |
 | `metrics` | Metricas de uso (tokens, latencia, erros) |
 | `failed_jobs` | Fila de retry com tentativas e dead letter |
-| `pending_actions` | Acoes pendentes de confirmacao (TTL 10 min) |
+| `pending_actions` | Acoes pendentes de confirmacao (TTL 10 min, isolada por topic_id) |
 | `company_profiles` | Perfis empresariais (nome, tom, assinatura) |
 | `clients` | Clientes cadastrados por empresa |
 | `domain_rules` | Regras de dominio manuais |
 | `playbooks` | Playbooks com gatilho, template e auto-respond |
+
+### Migracoes (bancos existentes)
+
+Se o banco ja existe com tabelas da Phase 1-2, rode a migracao para criar as tabelas da Phase 3+4:
+
+```bash
+psql $DATABASE_URL -f sql/migrations/001_phase3_4_tables.sql
+```
+
+O script usa `CREATE TABLE IF NOT EXISTS` e `ADD COLUMN IF NOT EXISTS`, entao e seguro rodar mais de uma vez.
 
 ## Troubleshooting
 
