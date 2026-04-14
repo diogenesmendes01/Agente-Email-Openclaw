@@ -355,8 +355,8 @@ def test_get_pending_updates_next_retry_at_on_claim():
 
 
 @pytest.mark.asyncio
-async def test_claim_released_on_processing_error():
-    """If processing fails after claim, the skeleton row must be deleted so retries work."""
+async def test_claim_released_on_pre_sideeffect_error():
+    """If processing fails BEFORE side effects, release claim so retries work."""
     from orchestrator.handlers.email_processor import EmailProcessor
     db = AsyncMock()
     qdrant = MagicMock()
@@ -375,13 +375,65 @@ async def test_claim_released_on_processing_error():
     db.get_account.return_value = {"id": 1}
     db.claim_email.return_value = 99  # claim succeeds
 
-    # Make classify blow up to trigger the except path
+    # Make classify blow up BEFORE any side effects
     llm.classify_email.side_effect = RuntimeError("LLM unavailable")
 
     result = await proc.process_email("em1", "u@t.com")
     assert result["status"] == "error"
-    # The skeleton row must have been released
+    # The skeleton row must have been released (safe to retry)
     db.release_claim.assert_called_once_with(99)
+    # update_decision should NOT have been called (no finalization)
+    db.update_decision.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_claim_kept_on_post_sideeffect_error():
+    """If processing fails AFTER side effects (e.g. send_reply done, then Telegram fails),
+    the claim must NOT be released — retrying would duplicate the auto-response."""
+    from orchestrator.handlers.email_processor import EmailProcessor
+    db = AsyncMock()
+    qdrant = MagicMock()
+    qdrant.is_connected.return_value = False
+    llm = AsyncMock()
+    gmail = AsyncMock()
+    telegram = AsyncMock()
+    playbook_svc = AsyncMock()
+
+    proc = EmailProcessor(db, qdrant, llm, gmail, telegram, playbook_service=playbook_svc)
+
+    gmail.get_email.return_value = {
+        "id": "em1", "from": "c@t.com", "from_email": "c@t.com",
+        "from_name": "Client", "subject": "Boleto", "body": "preciso boleto",
+        "body_clean": "", "attachments": [], "threadId": "t1", "date": "2026-04-14",
+    }
+    db.get_account.return_value = {"id": 1}
+    db.claim_email.return_value = 99
+
+    llm.classify_email.return_value = {
+        "prioridade": "Média", "importante": True, "confianca": 0.8,
+        "categoria": "financeiro", "reasoning_tokens": 10,
+    }
+
+    # Playbook matches and send_reply succeeds (side effect executed!)
+    playbook_svc.match.return_value = {
+        "playbook_id": 1, "template": "...", "trigger": "boleto",
+        "auto_respond": True, "confidence": 0.9,
+        "company": {"company_name": "CW", "tone": "formal", "signature": "Att"},
+    }
+    playbook_svc.generate_response.return_value = "Reply text"
+    gmail.send_reply.return_value = "sent_msg_id"  # Side effect succeeded
+
+    # Then summarize_email blows up
+    llm.summarize_email.side_effect = RuntimeError("LLM quota exceeded")
+
+    result = await proc.process_email("em1", "u@t.com")
+    assert result["status"] == "error"
+    # Claim must NOT be released — send_reply already fired
+    db.release_claim.assert_not_called()
+    # Decision row should be finalized with partial data
+    db.update_decision.assert_called_once()
+    call_data = db.update_decision.call_args[0][1]
+    assert "erro_parcial" in call_data.get("acao", "") or "erro" in call_data.get("resumo", "").lower()
 
 
 @pytest.mark.asyncio

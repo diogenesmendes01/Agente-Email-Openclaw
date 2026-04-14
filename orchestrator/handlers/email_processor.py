@@ -82,7 +82,11 @@ class EmailProcessor:
             "status": "processing",
             "timestamp": datetime.utcnow().isoformat()
         }
-        
+        # Tracks whether irreversible external side effects have fired
+        # (playbook send_reply, _execute_action). Once True, releasing the
+        # claim and retrying would duplicate those effects.
+        _side_effects_executed = False
+
         try:
             # 1. Fetch email
             logger.info(f"[{email_id}] Buscando email...")
@@ -266,6 +270,7 @@ class EmailProcessor:
                                 )
                                 if sent is not False:
                                     auto_responded = True
+                                    _side_effects_executed = True
                                     logger.info(f"[{email_id}] Auto-responded via playbook #{playbook_match['playbook_id']}")
                                 else:
                                     logger.warning(f"[{email_id}] send_reply returned False — not marking as auto-responded")
@@ -310,6 +315,7 @@ class EmailProcessor:
 
             # 8. Executar ação
             logger.info(f"[{email_id}] Executando ação: {action.get('acao')}")
+            _side_effects_executed = True
             await self._execute_action(action, email, account)
 
             # 9. Notificar Telegram
@@ -374,27 +380,46 @@ class EmailProcessor:
             result["status"] = "error"
             result["error"] = str(e)
 
-            # Release the claim so retries can re-claim this email.
-            # Without this, the skeleton row blocks all future attempts.
-            if result.get("decision_id"):
+            decision_id = result.get("decision_id")
+
+            if _side_effects_executed and decision_id:
+                # Side effects already fired (send_reply, archive, create_task, etc.).
+                # Releasing the claim and retrying would DUPLICATE those effects.
+                # Keep the claim and finalize the decision row with whatever data we have.
                 try:
-                    await self.db.release_claim(result["decision_id"])
-                    logger.info(f"[{email_id}] Released claim (decision #{result['decision_id']}) for retry")
+                    await self.db.update_decision(decision_id, {
+                        "subject": result.get("classification", {}).get("subject", ""),
+                        "from": "",
+                        "classificacao": result.get("classification", {}).get("categoria", ""),
+                        "prioridade": result.get("classification", {}).get("prioridade", ""),
+                        "categoria": result.get("classification", {}).get("categoria", ""),
+                        "acao": result.get("action", {}).get("acao", "erro_parcial"),
+                        "resumo": f"Processamento parcial — erro: {str(e)[:200]}",
+                        "reasoning_tokens": 0,
+                    })
+                    logger.warning(f"[{email_id}] Side effects already executed — keeping claim, NOT retrying")
+                except Exception as upd_err:
+                    logger.error(f"[{email_id}] Failed to finalize partial decision: {upd_err}")
+            elif decision_id:
+                # No side effects yet — safe to release claim and retry.
+                try:
+                    await self.db.release_claim(decision_id)
+                    logger.info(f"[{email_id}] Released claim (decision #{decision_id}) for retry")
                 except Exception as rel_err:
                     logger.error(f"[{email_id}] Failed to release claim: {rel_err}")
 
-            # Enqueue for retry (only on first failure, not during retry worker reprocessing)
-            if self.job_queue and not _is_retry:
-                try:
-                    acct = await self.db.get_account(account) if account else None
-                    acct_id = acct["id"] if acct else None
-                    await self.job_queue.enqueue(
-                        job_type="process_email",
-                        payload={"email_id": email_id, "account": account},
-                        account_id=acct_id,
-                    )
-                except Exception as enq_err:
-                    logger.error(f"[{email_id}] Failed to enqueue retry: {enq_err}")
+                # Enqueue for retry (only on first failure, not during retry worker reprocessing)
+                if self.job_queue and not _is_retry:
+                    try:
+                        acct = await self.db.get_account(account) if account else None
+                        acct_id = acct["id"] if acct else None
+                        await self.job_queue.enqueue(
+                            job_type="process_email",
+                            payload={"email_id": email_id, "account": account},
+                            account_id=acct_id,
+                        )
+                    except Exception as enq_err:
+                        logger.error(f"[{email_id}] Failed to enqueue retry: {enq_err}")
 
             return result
     
