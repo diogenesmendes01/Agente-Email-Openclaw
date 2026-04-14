@@ -7,8 +7,17 @@ import logging
 import html
 from typing import Dict, Any, Optional
 import httpx
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import httpx as _httpx
 
 logger = logging.getLogger(__name__)
+
+_retry_external = retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    retry=retry_if_exception_type((TimeoutError, ConnectionError, OSError, httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError)),
+    reraise=True,
+)
 
 
 class TelegramService:
@@ -46,6 +55,7 @@ class TelegramService:
     # Limite do Telegram para mensagens
     MAX_MESSAGE_LENGTH = 4096
 
+    @_retry_external
     async def send_email_notification(
         self,
         email: Dict[str, Any],
@@ -106,10 +116,17 @@ class TelegramService:
                     return msg_id
                 else:
                     logger.error(f"Erro Telegram: {response.status_code} - {response.text}")
-                    return None
+                    raise httpx.HTTPStatusError(
+                        f"Telegram API error: {response.status_code}",
+                        request=response.request, response=response,
+                    )
+        except (httpx.TimeoutException, httpx.ConnectError):
+            raise  # let tenacity retry
+        except httpx.HTTPStatusError:
+            raise  # let tenacity retry
         except Exception as e:
             logger.error(f"Erro ao enviar: {e}")
-            return None
+            raise
 
     def _split_message(self, text: str) -> list:
         """Divide mensagem longa em partes respeitando o limite do Telegram.

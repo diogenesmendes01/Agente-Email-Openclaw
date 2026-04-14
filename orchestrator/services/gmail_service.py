@@ -17,8 +17,17 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import httpx as _httpx
 
 logger = logging.getLogger(__name__)
+
+_retry_external = retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    retry=retry_if_exception_type((TimeoutError, ConnectionError, OSError, HttpError)),
+    reraise=True,
+)
 
 BASE_DIR = Path(os.getenv("EMAIL_AGENT_BASE_DIR", Path(__file__).resolve().parent.parent.parent))
 CREDENTIALS_DIR = BASE_DIR / "credentials"
@@ -91,6 +100,7 @@ class GmailService:
     # OPERAÇÕES GMAIL (async wrappers)
     # ============================================================
 
+    @_retry_external
     async def get_email(self, email_id: str, account: str) -> Optional[Dict[str, Any]]:
         """Busca email completo pelo ID"""
         service = self._get_service(account)
@@ -106,10 +116,10 @@ class GmailService:
             return self._parse_message(msg)
         except HttpError as e:
             logger.error(f"Erro ao buscar email {email_id}: {e}")
-            return None
+            raise
         except Exception as e:
             logger.error(f"Erro inesperado ao buscar email {email_id}: {e}")
-            return None
+            raise
 
     async def get_thread(self, thread_id: str, account: str) -> List[Dict[str, Any]]:
         """Busca todos os emails de uma thread"""
@@ -132,6 +142,7 @@ class GmailService:
             logger.error(f"Erro inesperado ao buscar thread {thread_id}: {e}")
             return []
 
+    @_retry_external
     async def archive_email(self, email_id: str, account: str) -> bool:
         """Arquiva um email (remove INBOX e UNREAD)"""
         service = self._get_service(account)
@@ -149,7 +160,7 @@ class GmailService:
             return True
         except HttpError as e:
             logger.error(f"Erro ao arquivar email {email_id}: {e}")
-            return False
+            raise
 
     async def mark_as_spam(self, email_id: str, account: str) -> bool:
         """Marca email como spam"""
@@ -204,6 +215,7 @@ class GmailService:
             logger.error(f"Erro ao criar rascunho: {e}")
             return None
 
+    @_retry_external
     async def send_reply(
         self, email_id: str, body: str, account: str,
         to: Optional[str] = None, subject: Optional[str] = None,
@@ -247,8 +259,9 @@ class GmailService:
             return True
         except HttpError as e:
             logger.error(f"Erro ao enviar resposta: {e}")
-            return False
+            raise
 
+    @_retry_external
     async def get_history(self, history_id: str, account: str) -> List[str]:
         """Busca IDs de mensagens desde um historyId"""
         service = self._get_service(account)
@@ -277,12 +290,12 @@ class GmailService:
         except HttpError as e:
             if e.resp.status == 404:
                 logger.warning(f"historyId {history_id} expirado")
-            else:
-                logger.error(f"Erro ao buscar history: {e}")
-            return []
+                return []  # expired history is not retryable
+            logger.error(f"Erro ao buscar history: {e}")
+            raise
         except Exception as e:
             logger.error(f"Erro inesperado ao buscar history: {e}")
-            return []
+            raise
 
     async def watch(self, account: str, topic: str, label_ids: List[str] = None) -> Optional[Dict]:
         """Ativa Gmail Watch (Pub/Sub push notifications). Expira em 7 dias."""
@@ -310,6 +323,7 @@ class GmailService:
             logger.error(f"Erro ao ativar Gmail Watch para {account}: {e}")
             return None
 
+    @_retry_external
     async def move_to_label(self, email_id: str, label: str, account: str) -> bool:
         """Move email para uma label específica"""
         service = self._get_service(account)
@@ -326,8 +340,9 @@ class GmailService:
             return True
         except HttpError as e:
             logger.error(f"Erro ao mover email {email_id} para {label}: {e}")
-            return False
+            raise
 
+    @_retry_external
     async def get_attachment(self, email_id: str, attachment_id: str, account: str) -> Optional[bytes]:
         """Download attachment bytes by ID."""
         service = self._get_service(account)
@@ -343,7 +358,7 @@ class GmailService:
             return base64.urlsafe_b64decode(data) if data else None
         except Exception as e:
             logger.error(f"Error fetching attachment {attachment_id}: {e}")
-            return None
+            raise
 
     # ============================================================
     # PARSING
