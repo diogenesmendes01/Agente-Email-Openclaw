@@ -54,6 +54,36 @@ class TestRunSqlFile:
         mock_cursor.execute.assert_called_once()
 
 
+class TestNoRedundantIndexes:
+    """schema.sql constraint names must match migration 002 index names
+    so that CREATE UNIQUE INDEX IF NOT EXISTS is a no-op on fresh installs."""
+
+    def test_schema_constraint_names_match_migration_index_names(self):
+        import re
+        from pathlib import Path
+
+        project_dir = Path(__file__).resolve().parent.parent
+        schema_sql = (project_dir / "sql" / "schema.sql").read_text()
+        migration_sql = (project_dir / "sql" / "migrations" / "002_idempotency_constraints.sql").read_text()
+
+        # Extract named constraints from schema.sql: CONSTRAINT <name> UNIQUE(...)
+        schema_constraints = set(re.findall(r"CONSTRAINT\s+(\w+)\s+UNIQUE", schema_sql, re.IGNORECASE))
+
+        # Extract index names from migration 002: CREATE UNIQUE INDEX IF NOT EXISTS <name>
+        # Filter to lines starting with CREATE (skip SQL comments)
+        sql_lines = [l for l in migration_sql.splitlines() if not l.strip().startswith("--")]
+        sql_body = "\n".join(sql_lines)
+        migration_indexes = set(re.findall(r"CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+(\w+)", sql_body, re.IGNORECASE))
+
+        # Every migration index must have a matching named constraint in schema.sql
+        missing = migration_indexes - schema_constraints
+        assert not missing, (
+            f"Migration 002 creates indexes {missing} that don't match any named "
+            f"constraint in schema.sql — fresh installs will get duplicate indexes. "
+            f"Schema constraints: {schema_constraints}, Migration indexes: {migration_indexes}"
+        )
+
+
 class TestRunDirectConnectionFirst:
     def test_connects_directly_to_target_db(self):
         """run() should try connecting directly to the target DB before falling back to admin."""
