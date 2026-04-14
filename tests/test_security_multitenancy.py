@@ -183,3 +183,83 @@ async def test_command_no_thread_id_in_private_chat():
     call_kwargs = services["telegram"].send_text.call_args
     thread_id = call_kwargs.kwargs.get("thread_id") if call_kwargs.kwargs else call_kwargs[1].get("thread_id", None) if len(call_kwargs) > 1 else None
     assert thread_id is None
+
+
+# ── Custom reply: topic_id and waiting_instruction ──
+
+
+@pytest.mark.asyncio
+async def test_custom_reply_passes_topic_id_to_generate():
+    """generate_reply should receive topic_id so the draft lands in the correct topic."""
+    from orchestrator.handlers.telegram_callbacks import handle_text_message
+    services = _make_services(allowed_user_ids={42})
+    pending_record = {
+        "id": 10, "email_id": "email1", "account_id": 1, "topic_id": 555,
+        "state": '{"waiting_instruction": true, "account": "test@gmail.com", "original_text": "..."}',
+    }
+    # Config types return None, custom_reply returns the pending
+    async def mock_get_pending(chat_id, action_type, actor_id=None, topic_id=None):
+        if action_type == "custom_reply":
+            return pending_record
+        return None
+    services["db"].get_pending_by_chat.side_effect = mock_get_pending
+    services["llm"].generate_custom_reply.return_value = "Draft reply text"
+    services["db"].update_pending_state.return_value = None
+
+    msg = {"chat": {"id": 100}, "message_thread_id": 555, "from": {"id": 42}, "text": "diz que entrego sexta"}
+    await handle_text_message(msg, services)
+
+    # send_text should have been called with thread_id=555
+    send_call = services["telegram"].send_text.call_args
+    assert send_call.kwargs.get("thread_id") == 555
+
+
+@pytest.mark.asyncio
+async def test_generate_reply_clears_waiting_instruction():
+    """After generating a draft, waiting_instruction should be set to False."""
+    from orchestrator.actions.reply import generate_reply
+    from unittest.mock import AsyncMock
+
+    db = AsyncMock()
+    db.update_pending_state.return_value = None
+    llm = AsyncMock()
+    llm.generate_custom_reply.return_value = "Draft text"
+    tg = AsyncMock()
+
+    pending = {
+        "id": 10, "state": '{"waiting_instruction": true, "original_text": "email body", "account": "a@b.com"}',
+    }
+    ctx = {
+        "email_id": "email1", "account": "a@b.com", "chat_id": 100, "topic_id": 555,
+        "instruction": "diz que entrego sexta", "pending": pending,
+        "db": db, "gmail": AsyncMock(), "telegram": tg, "llm": llm,
+    }
+    result = await generate_reply(ctx)
+    assert result == "Draft text"
+
+    # Check that update_pending_state was called with waiting_instruction=False
+    state_arg = db.update_pending_state.call_args[0][1]
+    assert state_arg["waiting_instruction"] is False
+    assert state_arg["last_reply"] == "Draft text"
+
+
+@pytest.mark.asyncio
+async def test_text_message_ignored_when_not_waiting_instruction():
+    """After draft is generated, text messages should NOT be treated as new instructions."""
+    from orchestrator.handlers.telegram_callbacks import handle_text_message
+    services = _make_services(allowed_user_ids={42})
+    pending_record = {
+        "id": 10, "email_id": "email1", "account_id": 1, "topic_id": 555,
+        "state": '{"waiting_instruction": false, "account": "a@b.com", "last_reply": "Draft"}',
+    }
+    async def mock_get_pending(chat_id, action_type, actor_id=None, topic_id=None):
+        if action_type == "custom_reply":
+            return pending_record
+        return None
+    services["db"].get_pending_by_chat.side_effect = mock_get_pending
+
+    msg = {"chat": {"id": 100}, "message_thread_id": 555, "from": {"id": 42}, "text": "random message"}
+    await handle_text_message(msg, services)
+
+    # generate_custom_reply should NOT have been called
+    services["llm"].generate_custom_reply.assert_not_called()

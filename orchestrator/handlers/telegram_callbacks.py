@@ -344,6 +344,7 @@ async def handle_text_message(message: dict, services: dict):
                 "email_id": pending["email_id"],
                 "account": state.get("account", ""),
                 "chat_id": chat_id,
+                "topic_id": topic_id,
                 "instruction": text,
                 "pending": pending,
                 "db": db,

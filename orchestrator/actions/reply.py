@@ -52,6 +52,7 @@ async def generate_reply(ctx: dict) -> str:
             return None
 
         state["last_reply"] = draft
+        state["waiting_instruction"] = False
         await ctx["db"].update_pending_state(pending["id"], state)
 
         keyboard = {
