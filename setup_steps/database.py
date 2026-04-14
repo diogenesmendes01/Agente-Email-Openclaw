@@ -101,13 +101,11 @@ def run(project_dir: Path, env: dict) -> bool:
         else:
             warning("sql/schema.sql não encontrado — pulando")
 
-        migration_file = project_dir / "sql" / "migrations" / "001_phase3_4_tables.sql"
-        if migration_file.exists():
-            with spinner("Rodando migrations..."):
-                run_sql_file(conn, migration_file)
-            success("Migrations aplicadas (001_phase3_4_tables.sql)")
-        else:
-            warning("Migration 001 não encontrada — pulando")
+        migrations_dir = project_dir / "sql" / "migrations"
+        for mig_file in sorted(migrations_dir.glob("*.sql")) if migrations_dir.exists() else []:
+            with spinner(f"Rodando {mig_file.name}..."):
+                run_sql_file(conn, mig_file)
+            success(f"Migration aplicada ({mig_file.name})")
 
         return True
     except Exception as e:

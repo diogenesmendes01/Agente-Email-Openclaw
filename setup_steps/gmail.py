@@ -105,7 +105,9 @@ def run(project_dir: Path, env: dict) -> list[dict]:
     accounts = []
     account_num = existing_count + 1
 
-    while True:
+    MAX_GMAIL_SLOTS = 20
+
+    while account_num <= MAX_GMAIL_SLOTS:
         if not confirm(f"Adicionar conta Gmail #{account_num}?", default=account_num == 1):
             break
 
@@ -114,6 +116,9 @@ def run(project_dir: Path, env: dict) -> list[dict]:
             accounts.append(account_info)
             account_num += 1
             success(f"Conta #{account_info['account_num']} configurada: {account_info['email']}")
+
+    if account_num > MAX_GMAIL_SLOTS:
+        warning(f"Limite de {MAX_GMAIL_SLOTS} contas Gmail atingido")
 
     if not accounts and existing_count == 0:
         warning("Nenhuma conta Gmail configurada")

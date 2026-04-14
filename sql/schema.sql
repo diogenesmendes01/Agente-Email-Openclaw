@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS feedback (
 
 CREATE TABLE IF NOT EXISTS decisions (
     id SERIAL PRIMARY KEY,
-    account_id INT REFERENCES accounts(id) ON DELETE CASCADE,
+    account_id INT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     email_id VARCHAR(100) NOT NULL,
     subject TEXT,
     sender VARCHAR(255),
@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     action VARCHAR(50),
     summary TEXT,
     reasoning_tokens INT DEFAULT 0,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(account_id, email_id)
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -172,5 +173,6 @@ CREATE TABLE IF NOT EXISTS playbooks (
     priority INT DEFAULT 0,
     active BOOLEAN DEFAULT true,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(company_id, trigger_description)
 );

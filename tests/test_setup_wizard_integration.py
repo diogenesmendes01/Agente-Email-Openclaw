@@ -65,6 +65,50 @@ class TestBootstrapDeps:
         assert "python_dotenv" not in import_names
 
 
+class TestFirstRunWarnings:
+    """first_run() should track step failures and show warnings."""
+
+    def test_shows_warnings_on_telegram_failure(self):
+        """If telegram.run returns False, first_run should include it in warnings."""
+        import setup_wizard
+        from setup_steps.common import warning as _warning
+
+        warnings_printed = []
+        original_dir = setup_wizard.PROJECT_DIR
+
+        with patch("setup_steps.dependencies.run", return_value=True), \
+             patch("setup_steps.env_config.run", return_value={"DATABASE_URL": "x"}), \
+             patch("setup_steps.database.run", return_value=True), \
+             patch("setup_steps.telegram.run", return_value=False), \
+             patch("setup_steps.env_config.write_env_file"), \
+             patch("setup_steps.gmail.run", return_value=[{"email": "a@g.com", "is_corporate": False, "account_num": 1, "hook_token_env": "T"}]), \
+             patch("setup_steps.accounts.run", return_value=[]), \
+             patch("setup_steps.playbooks.run", return_value=True), \
+             patch("setup_steps.common.warning", side_effect=lambda msg: warnings_printed.append(msg)):
+            setup_wizard.first_run()
+
+        assert any("Telegram" in w for w in warnings_printed)
+
+    def test_shows_warnings_on_empty_gmail(self):
+        """If gmail.run returns empty list, first_run should warn."""
+        import setup_wizard
+
+        warnings_printed = []
+
+        with patch("setup_steps.dependencies.run", return_value=True), \
+             patch("setup_steps.env_config.run", return_value={"DATABASE_URL": "x"}), \
+             patch("setup_steps.database.run", return_value=True), \
+             patch("setup_steps.telegram.run", return_value=True), \
+             patch("setup_steps.env_config.write_env_file"), \
+             patch("setup_steps.gmail.run", return_value=[]), \
+             patch("setup_steps.accounts.run", return_value=[]), \
+             patch("setup_steps.playbooks.run", return_value=True), \
+             patch("setup_steps.common.warning", side_effect=lambda msg: warnings_printed.append(msg)):
+            setup_wizard.first_run()
+
+        assert any("Gmail" in w for w in warnings_printed)
+
+
 class TestValidationDoesNotCrash:
     """Validation should handle missing services gracefully."""
 

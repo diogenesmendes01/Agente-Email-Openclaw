@@ -53,7 +53,9 @@ def detect_state() -> dict:
 def first_run():
     """Execute all steps sequentially for a fresh install."""
     from setup_steps import dependencies, env_config, database, telegram, gmail, accounts, playbooks
-    from setup_steps.common import success, error, confirm
+    from setup_steps.common import success, error, warning, confirm
+
+    warnings = []
 
     # Step 1: Dependencies
     if not dependencies.run(PROJECT_DIR):
@@ -65,17 +67,21 @@ def first_run():
 
     # Step 3: Database
     if not database.run(PROJECT_DIR, env):
+        warnings.append("PostgreSQL")
         if not confirm("Continuar mesmo assim?", default=False):
             return
 
     # Step 4: Telegram
-    telegram.run(env)
+    if not telegram.run(env):
+        warnings.append("Telegram")
 
     # Update .env with any changes from telegram step (chat_id discovery)
     env_config.write_env_file(PROJECT_DIR / ".env", env)
 
     # Step 5: Gmail
     gmail_accounts = gmail.run(PROJECT_DIR, env)
+    if not gmail_accounts:
+        warnings.append("Gmail (nenhuma conta configurada)")
 
     # Update .env with gmail accounts
     env_config.write_env_file(PROJECT_DIR / ".env", env)
@@ -88,12 +94,22 @@ def first_run():
 
     # Summary
     print()
-    success("=" * 40)
-    success("Setup concluído!")
-    success("=" * 40)
-    print()
-    print("    Para iniciar o sistema:")
-    print("      python -m uvicorn orchestrator.main:app --host 0.0.0.0 --port 8787")
+    if warnings:
+        warning("=" * 40)
+        warning("Setup concluído com pendências:")
+        for w in warnings:
+            warning(f"  • {w}")
+        warning("=" * 40)
+        print()
+        print("    Corrija os itens acima e execute novamente:")
+        print("      python setup_wizard.py")
+    else:
+        success("=" * 40)
+        success("Setup concluído!")
+        success("=" * 40)
+        print()
+        print("    Para iniciar o sistema:")
+        print("      python -m uvicorn orchestrator.main:app --host 0.0.0.0 --port 8787")
     print()
 
 

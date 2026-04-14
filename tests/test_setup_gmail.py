@@ -46,3 +46,17 @@ class TestCountExistingAccounts:
         from setup_steps.gmail import count_existing_accounts
         env = {"GMAIL_ACCOUNT_20": "z@g.com"}
         assert count_existing_accounts(env) == 20
+
+
+class TestRunSlotCap:
+    def test_does_not_offer_slot_21(self):
+        """run() should not offer to add account #21 when 20 slots are filled."""
+        from setup_steps.gmail import run
+        env = {f"GMAIL_ACCOUNT_{i}": f"user{i}@g.com" for i in range(1, 21)}
+        # count_existing_accounts returns 20, so account_num starts at 21
+        # The while loop condition (account_num <= 20) should prevent any prompt
+        with patch("setup_steps.gmail.check_client_secret", return_value=True), \
+             patch("setup_steps.gmail.confirm") as mock_confirm:
+            result = run(Path("/fake"), env)
+        # confirm should never be called — loop exits immediately
+        mock_confirm.assert_not_called()
