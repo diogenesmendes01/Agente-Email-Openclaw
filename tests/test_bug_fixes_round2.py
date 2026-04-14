@@ -6,16 +6,16 @@ from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 
 # ═══════════════════════════════════════════════════════════════
-# Fix #2 — DB-level idempotency (log_decision ON CONFLICT)
+# Fix #2 — Atomic claim pattern (claim_email + update_decision)
 # ═══════════════════════════════════════════════════════════════
 
 
-def test_log_decision_sql_has_on_conflict():
-    """log_decision should use ON CONFLICT DO NOTHING to prevent duplicate decisions."""
+def test_claim_email_sql_has_on_conflict():
+    """claim_email should use ON CONFLICT DO NOTHING for atomic dedup."""
     import inspect
     from orchestrator.services.database_service import DatabaseService
-    source = inspect.getsource(DatabaseService.log_decision)
-    assert "ON CONFLICT" in source, "log_decision must use ON CONFLICT for idempotency"
+    source = inspect.getsource(DatabaseService.claim_email)
+    assert "ON CONFLICT" in source, "claim_email must use ON CONFLICT for idempotency"
     assert "account_id, email_id" in source, "ON CONFLICT should be on (account_id, email_id)"
 
 
@@ -228,34 +228,37 @@ def test_schema_decisions_account_id_not_null():
 
 
 @pytest.mark.asyncio
-async def test_duplicate_email_skips_actions_and_notification(mock_pool):
-    """Reprocessing the same email should NOT duplicate actions or Telegram notifications."""
+async def test_claim_email_returns_none_on_duplicate(mock_pool):
+    """claim_email should return None when ON CONFLICT fires (duplicate)."""
     pool, conn = mock_pool
-
-    # log_decision returns None on duplicate (ON CONFLICT DO NOTHING, no RETURNING)
-    conn.fetchrow.return_value = None
-    conn.fetchval.return_value = None
+    conn.fetchrow.return_value = None  # ON CONFLICT DO NOTHING → no RETURNING
 
     from orchestrator.services.database_service import DatabaseService
     db = DatabaseService(pool)
-    result = await db.log_decision({
-        "account_id": 1, "email_id": "dup123",
-        "subject": "Test", "from": "a@b.com",
-        "classificacao": "outro", "prioridade": "Média",
-        "categoria": "outro", "acao": "notificar",
-        "resumo": "Test", "reasoning_tokens": 0,
-    })
-    assert result is None, "log_decision must return None for duplicates"
+    result = await db.claim_email(1, "dup123")
+    assert result is None, "claim_email must return None for duplicates"
 
 
 @pytest.mark.asyncio
-async def test_log_decision_returns_none_signals_email_processor():
-    """EmailProcessor should return 'duplicate' status when log_decision returns None."""
+async def test_claim_email_returns_id_on_success(mock_pool):
+    """claim_email should return the new decision id when claim succeeds."""
+    pool, conn = mock_pool
+    conn.fetchrow.return_value = {"id": 42}
+
+    from orchestrator.services.database_service import DatabaseService
+    db = DatabaseService(pool)
+    result = await db.claim_email(1, "new123")
+    assert result == 42
+
+
+def test_email_processor_uses_atomic_claim():
+    """EmailProcessor must use claim_email (not decision_exists) for concurrency safety."""
     import inspect
     from orchestrator.handlers.email_processor import EmailProcessor
     source = inspect.getsource(EmailProcessor.process_email)
-    assert "decision_id is None" in source, "EmailProcessor must check for None decision_id"
-    assert '"duplicate"' in source, "EmailProcessor must set status to 'duplicate'"
+    assert "claim_email" in source, "EmailProcessor must use claim_email for atomic dedup"
+    assert "decision_exists" not in source, "decision_exists is not concurrency-safe — use claim_email"
+    assert '"duplicate"' in source, "EmailProcessor must set status to 'duplicate' on claim failure"
 
 
 @pytest.mark.asyncio
@@ -311,33 +314,16 @@ def test_gmail_auth_validates_even_with_valid_token():
     assert found_valid_check, "Should have a creds.valid check"
 
 
-@pytest.mark.asyncio
-async def test_decision_exists_method(mock_pool):
-    """DatabaseService.decision_exists should check for existing decisions."""
-    pool, conn = mock_pool
-    conn.fetchval.return_value = True
-
-    from orchestrator.services.database_service import DatabaseService
-    db = DatabaseService(pool)
-    result = await db.decision_exists(1, "email123")
-    assert result is True
-    conn.fetchval.assert_called_once()
-    call_sql = conn.fetchval.call_args[0][0]
-    assert "decisions" in call_sql
-    assert "account_id" in call_sql
-    assert "email_id" in call_sql
-
-
-def test_early_dedup_check_before_playbook():
-    """EmailProcessor must check decision_exists BEFORE the playbook block."""
+def test_atomic_claim_before_playbook():
+    """EmailProcessor must call claim_email BEFORE the playbook block."""
     import inspect
     from orchestrator.handlers.email_processor import EmailProcessor
     source = inspect.getsource(EmailProcessor.process_email)
-    dedup_pos = source.index("decision_exists")
+    claim_pos = source.index("claim_email")
     playbook_pos = source.index("playbook_service")
-    assert dedup_pos < playbook_pos, (
-        "decision_exists check must come before playbook_service usage "
-        "to prevent duplicate auto-responses"
+    assert claim_pos < playbook_pos, (
+        "claim_email must come before playbook_service usage "
+        "to prevent concurrent duplicate auto-responses"
     )
 
 
@@ -354,6 +340,17 @@ def test_reap_stuck_called_in_retry_worker():
     worker_body = source[worker_start:worker_end]
     assert "reap_stuck_processing" in worker_body, (
         "reap_stuck_processing must be called inside retry_worker"
+    )
+
+
+def test_get_pending_updates_next_retry_at_on_claim():
+    """get_pending must set next_retry_at = NOW() when claiming so reaper measures from claim time."""
+    import inspect
+    from orchestrator.services.job_queue import JobQueue
+    source = inspect.getsource(JobQueue.get_pending)
+    assert "next_retry_at = NOW()" in source, (
+        "get_pending must update next_retry_at when claiming a job, "
+        "otherwise the reaper uses the original enqueue time and may reap active jobs"
     )
 
 

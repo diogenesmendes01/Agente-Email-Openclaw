@@ -133,12 +133,17 @@ class EmailProcessor:
             account_data = await self.db.get_account(account)
             account_id = account_data["id"] if account_data else None
 
-            # Early dedup: if this email was already processed, skip everything
-            # including playbook auto-response, classification, actions, and notifications.
-            if account_id and await self.db.decision_exists(account_id, email_id):
-                logger.info(f"[{email_id}] Already processed (decision exists) — skipping entire pipeline")
-                result["status"] = "duplicate"
-                return result
+            # Atomic claim: INSERT a skeleton row into decisions.
+            # The UNIQUE(account_id, email_id) constraint means only one worker
+            # wins. Losers get None and bail out — no playbook, no actions, nothing.
+            decision_id = None
+            if account_id:
+                decision_id = await self.db.claim_email(account_id, email_id)
+                if decision_id is None:
+                    logger.info(f"[{email_id}] Already claimed by another worker — skipping entire pipeline")
+                    result["status"] = "duplicate"
+                    return result
+            result["decision_id"] = decision_id
 
             context = {
                 "vips": config.get("vips", []),
@@ -265,10 +270,8 @@ class EmailProcessor:
             action = await self.llm.decide_action(email, classification, summary, config, context)
             result["action"] = action
             
-            # 7. Persistir decisão
+            # 7. Persistir decisão (update the skeleton row claimed earlier)
             decision_data = {
-                "email_id": email_id,
-                "account": account,
                 "subject": email.get("subject", ""),
                 "from": email.get("from", ""),
                 "classificacao": classification.get("categoria", "outro"),
@@ -276,21 +279,14 @@ class EmailProcessor:
                 "categoria": classification.get("categoria", "outro"),
                 "acao": action.get("acao", "notificar"),
                 "resumo": summary.get("resumo", ""),
-                "timestamp": result["timestamp"]
+                "reasoning_tokens": (
+                    classification.get("reasoning_tokens", 0) +
+                    summary.get("reasoning_tokens", 0) +
+                    action.get("reasoning_tokens", 0)
+                ),
             }
-            
-            # account_data and account_id already fetched above
-            if account_id:
-                decision_data["account_id"] = account_id
-            decision_id = await self.db.log_decision(decision_data)
-            result["decision_id"] = decision_id
-
-            # If decision_id is None, this email was already processed (ON CONFLICT).
-            # Skip side effects to prevent duplicate actions/notifications.
-            if decision_id is None:
-                logger.info(f"[{email_id}] Already processed (duplicate) — skipping actions & notification")
-                result["status"] = "duplicate"
-                return result
+            if decision_id:
+                await self.db.update_decision(decision_id, decision_data)
 
             # Armazenar no Qdrant
             if self.qdrant.is_connected() and result.get("embedding"):

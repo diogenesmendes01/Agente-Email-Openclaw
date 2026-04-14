@@ -68,19 +68,26 @@ class TestDatabaseService:
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_log_decision(self, mock_pool):
+    async def test_claim_email(self, mock_pool):
         pool, conn = mock_pool
         conn.fetchrow.return_value = {"id": 42}
         from orchestrator.services.database_service import DatabaseService
         db = DatabaseService(pool)
-        result = await db.log_decision({
-            "account_id": 1, "email_id": "abc123",
+        result = await db.claim_email(1, "abc123")
+        assert result == 42
+
+    @pytest.mark.asyncio
+    async def test_update_decision(self, mock_pool):
+        pool, conn = mock_pool
+        from orchestrator.services.database_service import DatabaseService
+        db = DatabaseService(pool)
+        await db.update_decision(42, {
             "subject": "Test", "from": "sender@test.com",
             "classificacao": "trabalho", "prioridade": "Alta",
             "categoria": "trabalho", "acao": "notificar",
             "resumo": "Test email", "reasoning_tokens": 100,
         })
-        assert result == 42
+        conn.execute.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_account_config(self, mock_pool):

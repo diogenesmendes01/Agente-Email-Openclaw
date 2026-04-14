@@ -167,26 +167,34 @@ class DatabaseService:
 
     # ── Decisions ──
 
-    async def decision_exists(self, account_id: int, email_id: str) -> bool:
-        """Check if a decision already exists for this (account_id, email_id) pair."""
-        async with self._pool.acquire() as conn:
-            return await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM decisions WHERE account_id = $1 AND email_id = $2)",
-                account_id, email_id,
-            )
+    async def claim_email(self, account_id: int, email_id: str) -> Optional[int]:
+        """Atomically claim an email for processing.
 
-    async def log_decision(self, data: Dict) -> Optional[int]:
-        """Log email processing decision. Returns id, or None if duplicate."""
+        Uses INSERT ... ON CONFLICT DO NOTHING on the UNIQUE(account_id, email_id)
+        constraint. Returns the new decision id if we won the claim, or None if
+        another worker already claimed it. This is the concurrency gate — only the
+        winner proceeds with side effects (playbook auto-response, actions, etc.).
+        """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                """INSERT INTO decisions
-                   (account_id, email_id, subject, sender, classification,
-                    priority, category, action, summary, reasoning_tokens)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                """INSERT INTO decisions (account_id, email_id)
+                   VALUES ($1, $2)
                    ON CONFLICT (account_id, email_id) DO NOTHING
                    RETURNING id""",
-                data.get("account_id"),
-                data.get("email_id"),
+                account_id, email_id,
+            )
+            return row["id"] if row else None
+
+    async def update_decision(self, decision_id: int, data: Dict):
+        """Fill in classification/action data on a previously claimed decision row."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE decisions
+                   SET subject = $2, sender = $3, classification = $4,
+                       priority = $5, category = $6, action = $7,
+                       summary = $8, reasoning_tokens = $9
+                   WHERE id = $1""",
+                decision_id,
                 data.get("subject"),
                 data.get("from", data.get("sender", "")),
                 data.get("classificacao", data.get("classification", "")),
@@ -196,10 +204,6 @@ class DatabaseService:
                 data.get("resumo", data.get("summary", "")),
                 data.get("reasoning_tokens", 0),
             )
-            if row:
-                return row["id"]
-            # Duplicate — return None so caller knows to skip side effects
-            return None
 
     # ── Tasks ──
 

@@ -52,8 +52,12 @@ class JobQueue:
                 )
                 if rows:
                     ids = [r["id"] for r in rows]
+                    # Set next_retry_at = NOW() so the reaper measures stuck time
+                    # from when the job was claimed, not from when it was enqueued.
                     await conn.execute(
-                        "UPDATE failed_jobs SET status = 'processing' WHERE id = ANY($1::int[])",
+                        """UPDATE failed_jobs
+                           SET status = 'processing', next_retry_at = NOW()
+                           WHERE id = ANY($1::int[])""",
                         ids,
                     )
                 return [dict(r) for r in rows]
