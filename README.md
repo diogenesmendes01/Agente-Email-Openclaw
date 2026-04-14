@@ -2,6 +2,17 @@
 
 Sistema inteligente de automacao de emails com IA que classifica, resume, decide acoes e **aprende** com o feedback do usuario. Recebe webhooks do Gmail via Pub/Sub, processa com LLM (OpenRouter + reasoning tokens), armazena memoria vetorial no Qdrant, persiste dados no PostgreSQL e envia notificacoes formatadas no Telegram com botoes de acao interativos.
 
+## Quick Start
+
+```bash
+# Clone e rode o wizard de setup interativo:
+git clone <repo-url>
+cd Agente-Email-Openclaw
+python setup_wizard.py
+```
+
+O wizard guia você por todas as etapas de configuração interativamente.
+
 ## Arquitetura
 
 ```
