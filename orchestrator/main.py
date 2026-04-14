@@ -123,7 +123,7 @@ async def lifespan(app_instance):
                     try:
                         if job["job_type"] == "process_email":
                             payload = json.loads(job["payload"]) if isinstance(job["payload"], str) else job["payload"]
-                            result = await processor.process_email(payload["email_id"], payload["account"])
+                            result = await processor.process_email(payload["email_id"], payload["account"], _is_retry=True)
                             if result.get("status") == "error":
                                 raise RuntimeError(result.get("error", "process_email returned error"))
                         await job_queue.mark_completed(job["id"])

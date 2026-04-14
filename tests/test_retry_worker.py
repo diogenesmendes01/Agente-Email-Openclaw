@@ -28,7 +28,7 @@ async def test_retry_worker_marks_failed_on_error_result():
         try:
             if job["job_type"] == "process_email":
                 payload = json.loads(job["payload"]) if isinstance(job["payload"], str) else job["payload"]
-                result = await mock_processor.process_email(payload["email_id"], payload["account"])
+                result = await mock_processor.process_email(payload["email_id"], payload["account"], _is_retry=True)
                 if result.get("status") == "error":
                     raise RuntimeError(result.get("error", "process_email returned error"))
             await mock_job_queue.mark_completed(job["id"])
@@ -41,6 +41,8 @@ async def test_retry_worker_marks_failed_on_error_result():
     mock_job_queue.mark_completed.assert_not_called()
     # mark_failed should have been called
     mock_job_queue.mark_failed.assert_called_once_with(1, "Gmail API down")
+    # process_email should have been called with _is_retry=True
+    mock_processor.process_email.assert_called_once_with("abc", "test@gmail.com", _is_retry=True)
 
 
 @pytest.mark.asyncio
@@ -64,7 +66,7 @@ async def test_retry_worker_marks_completed_on_success():
         try:
             if job["job_type"] == "process_email":
                 payload = json.loads(job["payload"]) if isinstance(job["payload"], str) else job["payload"]
-                result = await mock_processor.process_email(payload["email_id"], payload["account"])
+                result = await mock_processor.process_email(payload["email_id"], payload["account"], _is_retry=True)
                 if result.get("status") == "error":
                     raise RuntimeError(result.get("error", "process_email returned error"))
             await mock_job_queue.mark_completed(job["id"])
@@ -75,3 +77,5 @@ async def test_retry_worker_marks_completed_on_success():
     mock_job_queue.mark_completed.assert_called_once_with(2)
     # mark_failed should NOT have been called
     mock_job_queue.mark_failed.assert_not_called()
+    # process_email should have been called with _is_retry=True
+    mock_processor.process_email.assert_called_once_with("def", "test@gmail.com", _is_retry=True)

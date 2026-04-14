@@ -119,7 +119,7 @@ class QdrantService:
             
         except Exception as e:
             logger.error(f"Erro ao armazenar email no Qdrant: {e}")
-            return False
+            raise
     
     @_retry_external
     async def search_similar(
@@ -171,7 +171,7 @@ class QdrantService:
             
         except Exception as e:
             logger.error(f"Erro ao buscar emails similares: {e}")
-            return []
+            raise
     
     async def get_thread_context(self, thread_id: str) -> List[Dict[str, Any]]:
         """
@@ -317,7 +317,7 @@ class QdrantService:
             }
         except Exception as e:
             logger.error(f"Erro ao buscar perfil do remetente: {e}")
-            return {}
+            raise
 
     async def store_rules(self, rules: List[Dict[str, Any]]) -> bool:
         """Stores learned rules in the learned_rules collection."""
@@ -378,7 +378,7 @@ class QdrantService:
             return rules
         except Exception as e:
             logger.error(f"Erro ao buscar regras aprendidas: {e}")
-            return []
+            raise
 
     async def delete_rules(self, rule_ids: List[str]) -> bool:
         """Deletes rules by their IDs."""
