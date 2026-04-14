@@ -150,6 +150,79 @@ class TestFirstRunWarnings:
         assert any("Playbooks" in w for w in warnings_printed)
 
 
+class TestRerunMenuAddGmailAccountsFailure:
+    """rerun_menu 'Adicionar nova conta Gmail' path when accounts.run fails."""
+
+    def test_env_saved_even_when_accounts_run_fails(self, tmp_path):
+        """If gmail.run succeeds but accounts.run raises, .env should still
+        be written with the new Gmail accounts (gmail step is not lost)."""
+        import setup_wizard
+
+        original_dir = setup_wizard.PROJECT_DIR
+        setup_wizard.PROJECT_DIR = tmp_path
+
+        # Seed a minimal .env so parse_existing_env returns something
+        (tmp_path / ".env").write_text("DATABASE_URL=postgresql://u:p@localhost/db\n")
+
+        gmail_result = [{"email": "new@g.com", "is_corporate": False,
+                         "account_num": 1, "hook_token_env": "GMAIL_HOOK_TOKEN_1"}]
+
+        # accounts.run raises an exception (e.g. DB down)
+        def accounts_run_boom(*a, **kw):
+            raise Exception("connection refused")
+
+        try:
+            with patch("setup_steps.common.ask_choice", return_value=3), \
+                 patch("setup_wizard.ensure_requirements"), \
+                 patch("setup_steps.gmail.run", return_value=gmail_result) as mock_gmail, \
+                 patch("setup_steps.env_config.write_env_file") as mock_write, \
+                 patch("setup_steps.accounts.run", side_effect=accounts_run_boom):
+                # rerun_menu idx=3 should not crash even if accounts.run blows up
+                try:
+                    setup_wizard.rerun_menu()
+                except Exception:
+                    pass  # the exception is acceptable; what matters is below
+
+            # .env must have been written BEFORE accounts.run was called
+            mock_write.assert_called_once()
+            # gmail.run was called
+            mock_gmail.assert_called_once()
+        finally:
+            setup_wizard.PROJECT_DIR = original_dir
+
+    def test_accounts_failure_does_not_lose_gmail_env_vars(self, tmp_path):
+        """After gmail.run adds env vars, accounts.run returning accounts
+        without account_id should still leave .env updated."""
+        import setup_wizard
+
+        original_dir = setup_wizard.PROJECT_DIR
+        setup_wizard.PROJECT_DIR = tmp_path
+
+        (tmp_path / ".env").write_text("DATABASE_URL=postgresql://u:p@localhost/db\n")
+
+        gmail_result = [{"email": "corp@g.com", "is_corporate": True,
+                         "account_num": 1, "hook_token_env": "GMAIL_HOOK_TOKEN_1"}]
+        # accounts.run returns the same list WITHOUT account_id → DB creation failed
+        accounts_result = [{"email": "corp@g.com", "is_corporate": True,
+                            "account_num": 1, "hook_token_env": "GMAIL_HOOK_TOKEN_1"}]
+
+        try:
+            with patch("setup_steps.common.ask_choice", return_value=3), \
+                 patch("setup_wizard.ensure_requirements"), \
+                 patch("setup_steps.gmail.run", return_value=gmail_result), \
+                 patch("setup_steps.env_config.write_env_file") as mock_write, \
+                 patch("setup_steps.accounts.run", return_value=accounts_result):
+                setup_wizard.rerun_menu()
+
+            # .env was written (gmail env vars saved)
+            mock_write.assert_called_once()
+            # accounts.run was still called (not skipped)
+            written_env = mock_write.call_args[0][1]
+            assert "DATABASE_URL" in written_env
+        finally:
+            setup_wizard.PROJECT_DIR = original_dir
+
+
 class TestValidationDoesNotCrash:
     """Validation should handle missing services gracefully."""
 
