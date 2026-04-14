@@ -159,7 +159,16 @@ async def handle_callback(callback_query: dict, services: dict):
             status = await feedback.complete_reclassify(ctx)
             state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
             original_text = state.get("original_text", text)
-            await _mark_done(tg, chat_id, pending.get("message_id", message_id), status, original_text)
+            account = state.get("account", "")
+            was_auto = "Auto-respondido via playbook" in original_text
+            # Append reclassify status to message AND restore original action buttons
+            timestamp = datetime.now().strftime("%d/%m às %H:%M")
+            new_text = f"{original_text}\n\n───\n{status} em {timestamp}"
+            await tg.edit_message(
+                pending.get("message_id", message_id), new_text,
+                chat_id=str(chat_id),
+                reply_markup=_build_original_keyboard(email_id, account, auto_responded=was_auto),
+            )
         return
 
     # --- CANCEL RECLASSIFY ---
