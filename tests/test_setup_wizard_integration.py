@@ -153,40 +153,38 @@ class TestFirstRunWarnings:
 class TestRerunMenuAddGmailAccountsFailure:
     """rerun_menu 'Adicionar nova conta Gmail' path when accounts.run fails."""
 
-    def test_env_saved_even_when_accounts_run_fails(self, tmp_path):
-        """If gmail.run succeeds but accounts.run raises, .env should still
-        be written with the new Gmail accounts (gmail step is not lost)."""
+    def test_rerun_menu_survives_accounts_run_exception(self, tmp_path):
+        """If gmail.run succeeds but accounts.run raises, rerun_menu must
+        NOT propagate the exception — it should log an error and continue.
+        The .env must already be written (gmail accounts are not lost)."""
         import setup_wizard
 
         original_dir = setup_wizard.PROJECT_DIR
         setup_wizard.PROJECT_DIR = tmp_path
 
-        # Seed a minimal .env so parse_existing_env returns something
         (tmp_path / ".env").write_text("DATABASE_URL=postgresql://u:p@localhost/db\n")
 
         gmail_result = [{"email": "new@g.com", "is_corporate": False,
                          "account_num": 1, "hook_token_env": "GMAIL_HOOK_TOKEN_1"}]
 
-        # accounts.run raises an exception (e.g. DB down)
-        def accounts_run_boom(*a, **kw):
-            raise Exception("connection refused")
+        errors_printed = []
 
         try:
             with patch("setup_steps.common.ask_choice", return_value=3), \
                  patch("setup_wizard.ensure_requirements"), \
                  patch("setup_steps.gmail.run", return_value=gmail_result) as mock_gmail, \
                  patch("setup_steps.env_config.write_env_file") as mock_write, \
-                 patch("setup_steps.accounts.run", side_effect=accounts_run_boom):
-                # rerun_menu idx=3 should not crash even if accounts.run blows up
-                try:
-                    setup_wizard.rerun_menu()
-                except Exception:
-                    pass  # the exception is acceptable; what matters is below
+                 patch("setup_steps.accounts.run", side_effect=Exception("connection refused")), \
+                 patch("setup_steps.common.error", side_effect=lambda m: errors_printed.append(m)), \
+                 patch("setup_steps.common.warning"):
+                # This must NOT raise
+                setup_wizard.rerun_menu()
 
-            # .env must have been written BEFORE accounts.run was called
+            # .env was written before accounts.run was called
             mock_write.assert_called_once()
-            # gmail.run was called
             mock_gmail.assert_called_once()
+            # The error was logged, not swallowed silently
+            assert any("connection refused" in e for e in errors_printed)
         finally:
             setup_wizard.PROJECT_DIR = original_dir
 

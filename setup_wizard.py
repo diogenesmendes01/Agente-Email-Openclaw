@@ -175,7 +175,12 @@ def rerun_menu():
         gmail_accounts = gmail.run(PROJECT_DIR, existing_env)
         if gmail_accounts:
             env_config.write_env_file(PROJECT_DIR / ".env", existing_env)
-            gmail_accounts = accounts.run(PROJECT_DIR, existing_env, gmail_accounts)
+            try:
+                gmail_accounts = accounts.run(PROJECT_DIR, existing_env, gmail_accounts)
+            except Exception as e:
+                from setup_steps.common import error, warning
+                error(f"Falha ao criar contas no banco: {e}")
+                warning("As contas Gmail foram salvas no .env — crie as entradas no banco manualmente ou reexecute o wizard.")
 
     elif idx == 4:  # Telegram
         telegram.run(existing_env)
