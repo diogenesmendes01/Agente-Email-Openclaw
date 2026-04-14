@@ -5,7 +5,11 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Commands this module handles
-COMMANDS = {"/config_identidade", "/config_playbook", "/config_playbook_list", "/config_playbook_delete", "/help_config", "/custos"}
+COMMANDS = {
+    "/config_identidade", "/config_playbook", "/config_playbook_list",
+    "/config_playbook_delete", "/help_config", "/custos",
+    "/config_modelo",
+}
 
 
 def is_command(text: str) -> bool:
@@ -48,6 +52,8 @@ async def handle_command(message: dict, services: dict):
         await _delete_playbook(chat_id, topic_id, args, db, tg)
     elif cmd == "/custos":
         await _show_costs(chat_id, topic_id, args, db, tg, services)
+    elif cmd == "/config_modelo":
+        await _handle_config_modelo(chat_id, topic_id, actor_id, args, db, tg, services)
     elif cmd == "/help_config":
         await tg.send_text(chat_id, (
             "<b>Comandos de Configuração:</b>\n\n"
@@ -55,6 +61,8 @@ async def handle_command(message: dict, services: dict):
             "/config_playbook — Criar novo playbook\n"
             "/config_playbook_list — Listar playbooks ativos\n"
             "/config_playbook_delete &lt;id&gt; — Remover playbook\n"
+            "/config_modelo — Ver/trocar modelo de IA\n"
+            "/config_modelo listar 20 — Listar 20 modelos por preço\n"
             "/custos — Relatório de custos API (7 dias)\n"
             "/custos 30 — Relatório dos últimos 30 dias"
         ), thread_id=message.get("message_thread_id"))
@@ -145,6 +153,165 @@ async def _delete_playbook(chat_id, topic_id, args, db, tg):
         await tg.send_text(chat_id, f"\u2705 Playbook #{playbook_id} removido.", thread_id=thread_id)
     else:
         await tg.send_text(chat_id, f"\u274c Playbook #{playbook_id} não encontrado ou não pertence a esta empresa.", thread_id=thread_id)
+
+
+async def _handle_config_modelo(chat_id, topic_id, actor_id, args, db, tg, services):
+    """Handle /config_modelo command — view, change, or browse models."""
+    thread_id = topic_id if topic_id != chat_id else None
+
+    account = await db.get_account_by_topic(topic_id)
+    if not account:
+        await tg.send_text(chat_id, "❌ Conta não encontrada para este tópico.", thread_id=thread_id)
+        return
+
+    account_id = account["id"]
+    model_registry = services.get("model_registry")
+
+    if not model_registry:
+        await tg.send_text(chat_id, "❌ Serviço de modelos não disponível.", thread_id=thread_id)
+        return
+
+    args = args.strip().lower() if args else ""
+
+    # /config_modelo listar [N] — browse all models by price
+    if args.startswith("listar"):
+        parts = args.split()
+        limit = 20
+        if len(parts) > 1:
+            try:
+                limit = min(max(int(parts[1]), 5), 100)
+            except ValueError:
+                pass
+
+        models = await model_registry.list_models(limit=limit)
+        if not models:
+            await tg.send_text(chat_id, "❌ Não foi possível carregar modelos. Tente novamente.", thread_id=thread_id)
+            return
+
+        lines = [f"<b>📋 Top {len(models)} modelos por preço:</b>\n"]
+        for i, m in enumerate(models, 1):
+            tag = "🆓" if m.is_free else "💰"
+            lines.append(f"{i}. {tag} <code>{m.id}</code>")
+            lines.append(f"   {m.name} — {m.price_label()}")
+        lines.append(f"\n💡 Para usar: /config_modelo usar &lt;id&gt;")
+        # Split if too long
+        text = "\n".join(lines)
+        if len(text) > 4000:
+            text = text[:4000] + "\n..."
+        await tg.send_text(chat_id, text, thread_id=thread_id)
+        return
+
+    # /config_modelo buscar <query> — search models
+    if args.startswith("buscar"):
+        query = args.replace("buscar", "", 1).strip()
+        if not query:
+            await tg.send_text(chat_id, "💡 Uso: /config_modelo buscar gemini", thread_id=thread_id)
+            return
+        results = await model_registry.search_models(query, limit=15)
+        if not results:
+            await tg.send_text(chat_id, f"❌ Nenhum modelo encontrado para '{query}'.", thread_id=thread_id)
+            return
+        lines = [f"<b>🔍 Resultados para '{query}':</b>\n"]
+        for m in results:
+            tag = "🆓" if m.is_free else "💰"
+            lines.append(f"{tag} <code>{m.id}</code> — {m.price_label()}")
+        lines.append(f"\n💡 Para usar: /config_modelo usar &lt;id&gt;")
+        await tg.send_text(chat_id, "\n".join(lines), thread_id=thread_id)
+        return
+
+    # /config_modelo usar <model_id> — set model
+    if args.startswith("usar"):
+        model_id = args.replace("usar", "", 1).strip()
+        if not model_id:
+            await tg.send_text(chat_id, "💡 Uso: /config_modelo usar google/gemini-2.5-flash-preview", thread_id=thread_id)
+            return
+        # Validate model exists
+        model_info = await model_registry.get_model(model_id)
+        if not model_info:
+            await tg.send_text(chat_id, f"❌ Modelo <code>{model_id}</code> não encontrado no OpenRouter.\n\n💡 Use /config_modelo buscar &lt;nome&gt; para procurar.", thread_id=thread_id)
+            return
+        # Save to DB
+        await db.set_account_model(account_id, model_id)
+        await tg.send_text(chat_id, (
+            f"✅ <b>Modelo atualizado!</b>\n\n"
+            f"🤖 {model_info.name}\n"
+            f"📎 <code>{model_info.id}</code>\n"
+            f"💰 {model_info.price_label()}\n"
+            f"📏 Contexto: {model_info.context_length:,} tokens\n\n"
+            f"O próximo email já será processado com este modelo."
+        ), thread_id=thread_id)
+        return
+
+    # /config_modelo reset — volta pro padrão
+    if args == "reset":
+        await db.set_account_model(account_id, None)
+        import os
+        default = os.getenv("LLM_MODEL", "z-ai/glm-5-turbo")
+        await tg.send_text(chat_id, f"✅ Modelo resetado para o padrão: <code>{default}</code>", thread_id=thread_id)
+        return
+
+    # /config_modelo (sem args) — show current + curated list
+    model_config = await db.get_account_model(account_id)
+    current_model = model_config["model"]
+
+    import os
+    default_model = os.getenv("LLM_MODEL", "z-ai/glm-5-turbo")
+    display_model = current_model or default_model
+    is_custom = bool(current_model)
+
+    # Get current model info
+    current_info = await model_registry.get_model(display_model)
+
+    lines = ["<b>🤖 Configuração de Modelo</b>\n"]
+    if current_info:
+        tag = " (personalizado)" if is_custom else " (padrão)"
+        lines.append(f"Atual: <b>{current_info.name}</b>{tag}")
+        lines.append(f"ID: <code>{current_info.id}</code>")
+        lines.append(f"Preço: {current_info.price_label()}")
+    else:
+        lines.append(f"Atual: <code>{display_model}</code>")
+
+    # Show curated models
+    curated = await model_registry.get_curated_models()
+    if curated:
+        lines.append("\n<b>⭐ Top 15 — Melhores para Email:</b>\n")
+
+        free = [m for m in curated if m.is_free]
+        budget = [m for m in curated if not m.is_free and m.avg_price < 1.0]
+        mid = [m for m in curated if 1.0 <= m.avg_price < 5.0]
+        premium = [m for m in curated if m.avg_price >= 5.0]
+
+        if free:
+            lines.append("🆓 <b>Gratuitos:</b>")
+            for m in free:
+                marker = " ✅" if m.id == display_model else ""
+                lines.append(f"  • {m.name}{marker}\n    <code>{m.id}</code>")
+
+        if budget:
+            lines.append("\n💚 <b>Econômicos:</b>")
+            for m in budget:
+                marker = " ✅" if m.id == display_model else ""
+                lines.append(f"  • {m.name} — {m.price_label()}{marker}\n    <code>{m.id}</code>")
+
+        if mid:
+            lines.append("\n💛 <b>Intermediários:</b>")
+            for m in mid:
+                marker = " ✅" if m.id == display_model else ""
+                lines.append(f"  • {m.name} — {m.price_label()}{marker}\n    <code>{m.id}</code>")
+
+        if premium:
+            lines.append("\n💎 <b>Premium:</b>")
+            for m in premium:
+                marker = " ✅" if m.id == display_model else ""
+                lines.append(f"  • {m.name} — {m.price_label()}{marker}\n    <code>{m.id}</code>")
+
+    lines.append("\n<b>Comandos:</b>")
+    lines.append("/config_modelo usar &lt;id&gt; — Trocar modelo")
+    lines.append("/config_modelo listar 20 — Ver 20 modelos por preço")
+    lines.append("/config_modelo buscar gemini — Buscar modelos")
+    lines.append("/config_modelo reset — Voltar ao padrão")
+
+    await tg.send_text(chat_id, "\n".join(lines), thread_id=thread_id)
 
 
 async def _show_costs(chat_id, topic_id, args, db, tg, services):

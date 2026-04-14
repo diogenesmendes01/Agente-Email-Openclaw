@@ -132,7 +132,12 @@ class EmailProcessor:
             # Fetch account_id early (needed for playbook check and later DB ops)
             account_data = await self.db.get_account(account)
             account_id = account_data["id"] if account_data else None
-            
+
+            # Resolve per-account LLM model (NULL = use global default)
+            model_override = account_data.get("llm_model") if account_data else None
+            if model_override:
+                logger.info(f"[{email_id}] Usando modelo da conta: {model_override}")
+
             owner_name = account_data.get("owner_name", "") if account_data else ""
             context = {
                 "vips": config.get("vips", []),
@@ -205,7 +210,7 @@ class EmailProcessor:
 
             # 4. Classificar
             logger.info(f"[{email_id}] Classificando...")
-            classification = await self.llm.classify_email(email, context)
+            classification = await self.llm.classify_email(email, context, model_override=model_override)
             result["classification"] = classification
             
             # 4.5. Check playbooks (if configured)
@@ -246,12 +251,12 @@ class EmailProcessor:
 
             # 5. Resumir
             logger.info(f"[{email_id}] Resumindo...")
-            summary = await self.llm.summarize_email(email, classification, context)
+            summary = await self.llm.summarize_email(email, classification, context, model_override=model_override)
             result["summary"] = summary
             
             # 6. Decidir ação
             logger.info(f"[{email_id}] Decidindo ação...")
-            action = await self.llm.decide_action(email, classification, summary, config, context)
+            action = await self.llm.decide_action(email, classification, summary, config, context, model_override=model_override)
             result["action"] = action
             
             # 7. Persistir decisão

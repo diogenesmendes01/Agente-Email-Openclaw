@@ -69,10 +69,12 @@ from orchestrator.services.alert_service import AlertService
 from orchestrator.services.job_queue import JobQueue
 from orchestrator.handlers.telegram_callbacks import handle_callback, handle_text_message
 from orchestrator.services.playbook_service import PlaybookService
+from orchestrator.services.model_registry import ModelRegistry
 
 # Serviços que não precisam de init async ficam no nível de módulo
 qdrant = QdrantService()
-llm = LLMService()
+model_registry = ModelRegistry()
+llm = LLMService(model_registry=model_registry)
 gmail = GmailService()
 telegram = TelegramService()
 
@@ -109,6 +111,9 @@ async def lifespan(app_instance):
         throttle_minutes=_settings.alert_throttle_minutes,
     )
     job_queue = JobQueue(pool, max_attempts=_settings.job_max_attempts)
+
+    # Pre-load model registry (non-blocking, will lazy-load on first use if this fails)
+    await model_registry.refresh()
 
     playbook_service = PlaybookService(db, llm)
     learning = LearningEngine(qdrant, telegram)
@@ -371,7 +376,8 @@ async def telegram_callback(request: Request):
 
         _settings = get_settings()
         services = {"db": db, "gmail": gmail, "telegram": telegram, "llm": llm,
-                     "metrics": metrics, "allowed_user_ids": _settings.telegram_allowed_user_ids}
+                     "metrics": metrics, "model_registry": model_registry,
+                     "allowed_user_ids": _settings.telegram_allowed_user_ids}
 
         callback_query = body.get("callback_query")
         if callback_query:

@@ -17,24 +17,16 @@ logger = logging.getLogger(__name__)
 class LLMService:
     """Serviço para interagir com LLM via OpenRouter e OpenAI"""
 
-    # Preços por 1M tokens (USD) — OpenRouter pricing
-    # Atualizar conforme necessário: https://openrouter.ai/models
-    MODEL_PRICING = {
-        "z-ai/glm-5-turbo": {"prompt": 0.014, "completion": 0.014},
-        "google/gemini-2.0-flash-001": {"prompt": 0.10, "completion": 0.40},
-        "google/gemini-2.5-flash-preview": {"prompt": 0.15, "completion": 0.60},
-        "google/gemini-2.5-pro-preview": {"prompt": 1.25, "completion": 10.0},
-        "openai/gpt-4o-mini": {"prompt": 0.15, "completion": 0.60},
-        "openai/gpt-4o": {"prompt": 2.50, "completion": 10.0},
-        "anthropic/claude-sonnet-4": {"prompt": 3.0, "completion": 15.0},
-    }
-
-    def __init__(self):
+    def __init__(self, model_registry=None):
         self.openrouter_key = os.getenv("OPENROUTER_API_KEY")
         self.openai_key = os.getenv("OPENAI_API_KEY")
 
-        self.model = os.getenv("LLM_MODEL", "z-ai/glm-5-turbo")
+        self.default_model = os.getenv("LLM_MODEL", "z-ai/glm-5-turbo")
+        # Legacy alias kept for code that reads self.model
+        self.model = self.default_model
         self.embedding_model = "text-embedding-3-small"
+
+        self.model_registry = model_registry
 
         self.openai_client = None
         if self.openai_key:
@@ -43,15 +35,20 @@ class LLMService:
         self._configured = bool(self.openrouter_key)
 
         if self._configured:
-            logger.info(f"LLMService configurado com modelo {self.model}")
+            logger.info(f"LLMService configurado com modelo padrão {self.default_model}")
         else:
             logger.warning("LLMService não configurado - chaves não encontradas")
 
-    def _calculate_cost(self, prompt_tokens: int, completion_tokens: int) -> float:
-        """Calcula custo em USD baseado no modelo e tokens usados"""
-        pricing = self.MODEL_PRICING.get(self.model)
-        if not pricing:
-            # Fallback: estimar preço genérico barato
+    def _resolve_model(self, model_override: str = None) -> str:
+        """Resolve which model to use: override > default."""
+        return model_override or self.default_model
+
+    async def _calculate_cost(self, model_id: str, prompt_tokens: int, completion_tokens: int) -> float:
+        """Calcula custo em USD usando preço dinâmico do ModelRegistry."""
+        if self.model_registry:
+            pricing = await self.model_registry.get_pricing(model_id)
+        else:
+            # Fallback hardcoded para quando registry não está disponível
             pricing = {"prompt": 0.10, "completion": 0.40}
         cost = (
             (prompt_tokens / 1_000_000) * pricing["prompt"]
@@ -65,11 +62,12 @@ class LLMService:
     async def classify_email(
         self,
         email: Dict[str, Any],
-        context: Dict[str, Any]
+        context: Dict[str, Any],
+        model_override: str = None,
     ) -> Dict[str, Any]:
         """Classifica email"""
         prompt = self._build_classifier_prompt(email, context)
-        response = await self._call_llm(prompt, max_tokens=32768)
+        response = await self._call_llm(prompt, max_tokens=32768, model_override=model_override)
         
         if response:
             result = self._parse_classification(response.get("content", ""))
@@ -86,11 +84,12 @@ class LLMService:
         self,
         email: Dict[str, Any],
         classification: Dict[str, Any],
-        context: Dict[str, Any] = None
+        context: Dict[str, Any] = None,
+        model_override: str = None,
     ) -> Dict[str, Any]:
         """Gera resumo"""
         prompt = self._build_summarizer_prompt(email, classification, context)
-        response = await self._call_llm(prompt, max_tokens=32768)
+        response = await self._call_llm(prompt, max_tokens=32768, model_override=model_override)
 
         if response:
             result = self._parse_summary(response.get("content", ""))
@@ -109,12 +108,13 @@ class LLMService:
         classification: Dict[str, Any],
         summary: Dict[str, Any],
         account_config: Dict[str, Any],
-        context: Dict[str, Any] = None
+        context: Dict[str, Any] = None,
+        model_override: str = None,
     ) -> Dict[str, Any]:
         """Decide ação a tomar"""
         prompt = self._build_action_prompt(email, classification, summary, account_config, context)
 
-        response = await self._call_llm(prompt, max_tokens=32768)
+        response = await self._call_llm(prompt, max_tokens=32768, model_override=model_override)
 
         if response:
             result = self._parse_action(response.get("content", ""))
@@ -153,13 +153,21 @@ class LLMService:
             logger.error(f"Erro ao criar embedding: {e}")
             return None
     
-    async def _call_llm(self, prompt: str, max_tokens: int = 500) -> Optional[Dict[str, Any]]:
-        """Chama LLM via OpenRouter com retry automático"""
+    async def _call_llm(self, prompt: str, max_tokens: int = 500, model_override: str = None) -> Optional[Dict[str, Any]]:
+        """Chama LLM via OpenRouter com retry automático e fallback de modelo."""
         if not self.openrouter_key:
             logger.error("OpenRouter API key não configurada")
             return None
 
-        return await self._call_llm_with_retry(prompt, max_tokens)
+        model = self._resolve_model(model_override)
+        result = await self._call_llm_with_retry(prompt, max_tokens, model)
+
+        # Fallback: se falhou e temos modelo alternativo, tenta ele
+        if result is None and model != self.default_model:
+            logger.warning(f"Modelo {model} falhou, tentando fallback {self.default_model}")
+            result = await self._call_llm_with_retry(prompt, max_tokens, self.default_model)
+
+        return result
 
     @retry(
         stop=stop_after_attempt(3),
@@ -167,9 +175,23 @@ class LLMService:
         retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
         reraise=True
     )
-    async def _call_llm_with_retry(self, prompt: str, max_tokens: int) -> Optional[Dict[str, Any]]:
+    async def _call_llm_with_retry(self, prompt: str, max_tokens: int, model: str = None) -> Optional[Dict[str, Any]]:
         """Implementação com retry exponencial"""
+        model = model or self.default_model
         try:
+            # Build request payload
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": 0.3,
+            }
+
+            # Only enable thinking for models that support it
+            thinking_models = {"z-ai/glm-5-turbo"}
+            if model in thinking_models:
+                payload["thinking"] = {"type": "enabled"}
+
             async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.post(
                     "https://openrouter.ai/api/v1/chat/completions",
@@ -179,13 +201,7 @@ class LLMService:
                         "HTTP-Referer": "https://openclaw.ai",
                         "X-Title": "Email Agent"
                     },
-                    json={
-                        "model": self.model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": max_tokens,
-                        "temperature": 0.3,
-                        "thinking": {"type": "enabled"}
-                    }
+                    json=payload,
                 )
 
                 if response.status_code == 200:
@@ -202,10 +218,10 @@ class LLMService:
                     details = usage.get("completion_tokens_details") or {}
                     reasoning_tokens = details.get("reasoning_tokens", 0)
 
-                    cost_usd = self._calculate_cost(prompt_tokens, completion_tokens)
+                    cost_usd = await self._calculate_cost(model, prompt_tokens, completion_tokens)
 
                     logger.info(
-                        f"LLM usage: model={self.model} "
+                        f"LLM usage: model={model} "
                         f"prompt={prompt_tokens} completion={completion_tokens} "
                         f"total={total_tokens} cost=${cost_usd:.6f}"
                     )
@@ -217,18 +233,19 @@ class LLMService:
                         "total_tokens": total_tokens,
                         "reasoning_tokens": reasoning_tokens,
                         "cost_usd": cost_usd,
+                        "model_used": model,
                     }
                 elif response.status_code == 429:
-                    logger.warning("Rate limited pelo OpenRouter, tentando novamente...")
+                    logger.warning(f"Rate limited pelo OpenRouter ({model}), tentando novamente...")
                     raise httpx.TimeoutException("Rate limited")
                 else:
-                    logger.error(f"Erro LLM: {response.status_code} - {response.text[:200]}")
+                    logger.error(f"Erro LLM ({model}): {response.status_code} - {response.text[:200]}")
                     return None
 
         except (httpx.TimeoutException, httpx.ConnectError):
             raise  # Deixa o retry handler tratar
         except Exception as e:
-            logger.error(f"Erro ao chamar LLM: {e}")
+            logger.error(f"Erro ao chamar LLM ({model}): {e}")
             return None
     
     MAX_PROMPT_TOKENS = 6000

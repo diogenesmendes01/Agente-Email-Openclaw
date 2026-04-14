@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     oauth_token_path VARCHAR(255),
     telegram_topic_id BIGINT,
     learning_counter INT DEFAULT 0,
+    llm_model VARCHAR(255),
+    llm_fallback_model VARCHAR(255),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 

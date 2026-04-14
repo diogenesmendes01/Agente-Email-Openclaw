@@ -238,6 +238,27 @@ class DatabaseService:
                 count, account_id,
             )
 
+    # ── LLM Model ──
+
+    async def set_account_model(self, account_id: int, model: str, fallback: str = None):
+        """Set the LLM model for an account."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE accounts SET llm_model = $1, llm_fallback_model = $2 WHERE id = $3",
+                model or None, fallback, account_id,
+            )
+
+    async def get_account_model(self, account_id: int) -> dict:
+        """Get model config for an account. Returns {model, fallback}."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT llm_model, llm_fallback_model FROM accounts WHERE id = $1",
+                account_id,
+            )
+            if row:
+                return {"model": row["llm_model"], "fallback": row["llm_fallback_model"]}
+            return {"model": None, "fallback": None}
+
     # ── Pending Actions ──
 
     async def create_pending_action(self, account_id, email_id, action_type, actor_id, chat_id, message_id, state=None, topic_id=None):
