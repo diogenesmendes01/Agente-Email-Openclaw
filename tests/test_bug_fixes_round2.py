@@ -616,3 +616,48 @@ async def test_partial_error_preserves_real_subject_and_sender():
     assert data["from"] == "vip@corp.com", (
         f"Partial error finalization must preserve real sender, got: {data['from']!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_execute_action_mid_failure_keeps_claim():
+    """If _execute_action raises mid-way for an irreversible action (e.g. archive
+    API call succeeds at network level but method throws afterwards), the claim
+    must NOT be released — the external effect already happened.
+
+    The flag must be set BEFORE _execute_action is called so that even if the
+    method raises, the except block knows side effects may have fired.
+    """
+    from orchestrator.handlers.email_processor import EmailProcessor
+    db = AsyncMock()
+    qdrant = MagicMock()
+    qdrant.is_connected.return_value = False
+    llm = AsyncMock()
+    gmail = AsyncMock()
+    telegram = AsyncMock()
+
+    proc = EmailProcessor(db, qdrant, llm, gmail, telegram)
+
+    gmail.get_email.return_value = {
+        "id": "em1", "from": "a@b.com", "from_email": "a@b.com",
+        "from_name": "A", "subject": "Arquivar isso", "body": "corpo",
+        "body_clean": "", "attachments": [], "threadId": "t1", "date": "2026-04-14",
+    }
+    db.get_account.return_value = {"id": 1}
+    db.claim_email.return_value = 66
+
+    llm.classify_email.return_value = {
+        "prioridade": "Alta", "importante": True, "confianca": 0.9,
+        "categoria": "trabalho", "reasoning_tokens": 10,
+    }
+    llm.summarize_email.return_value = {"resumo": "Resumo", "reasoning_tokens": 5}
+    llm.decide_action.return_value = {"acao": "arquivar", "reasoning_tokens": 5}
+
+    # archive_email itself raises (simulates mid-execution failure)
+    gmail.archive_email.side_effect = RuntimeError("Gmail API partial failure")
+
+    result = await proc.process_email("em1", "a@b.com")
+    assert result["status"] == "error"
+    # Flag was set BEFORE the call → claim must NOT be released
+    db.release_claim.assert_not_called()
+    # Partial finalization must have been written
+    assert db.update_decision.call_count == 2  # step 7 + except block

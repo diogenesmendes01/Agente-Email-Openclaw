@@ -319,12 +319,15 @@ class EmailProcessor:
 
             # 8. Executar ação
             logger.info(f"[{email_id}] Executando ação: {action.get('acao')}")
-            await self._execute_action(action, email, account)
-            # Only mark side effects for actions that touch external systems.
-            # "notificar" does nothing in _execute_action — the Telegram
-            # notification below is idempotent (duplicate message is harmless).
+            # Mark side effects BEFORE the call for irreversible actions.
+            # If _execute_action raises mid-way (e.g. archive API succeeds
+            # but a subsequent line throws), the flag is already set, so the
+            # except block will NOT release the claim and risk duplication.
+            # "notificar" is excluded — it's a no-op in _execute_action and
+            # the Telegram notification is idempotent.
             if action.get("acao") in ("arquivar", "criar_task", "rascunho"):
                 _side_effects_executed = True
+            await self._execute_action(action, email, account)
 
             # 9. Notificar Telegram
             # Calcular total de reasoning tokens
