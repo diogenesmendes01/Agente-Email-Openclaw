@@ -19,25 +19,27 @@ OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 
 # Curated list: best models for text/email classification, summarization, drafting.
 # Order = display order in Telegram. IDs must match OpenRouter model IDs.
+# Updated: 2026-04-14
 CURATED_MODEL_IDS = [
     # --- Free ---
-    "google/gemini-2.0-flash-exp:free",
-    "deepseek/deepseek-chat-v3-0324:free",
-    "meta-llama/llama-4-maverick:free",
+    "openrouter/free",                              # Auto-pick best free model
+    "google/gemma-4-27b-a9b-it:free",               # Google Gemma 4 27B
+    "nvidia/nemotron-3-super-120b-a12b:free",        # NVIDIA Nemotron 120B
+    "qwen/qwen3-next-80b-a3b-instruct:free",        # Qwen3 80B
     # --- Budget ---
-    "z-ai/glm-5-turbo",
-    "google/gemini-2.5-flash-preview",
+    "google/gemini-2.5-flash",
     "openai/gpt-4o-mini",
     "deepseek/deepseek-chat-v3-0324",
     "mistralai/mistral-small-3.1-24b-instruct",
-    # --- Mid-range ---
-    "google/gemini-2.5-pro-preview",
-    "anthropic/claude-3.5-haiku",
     "openai/gpt-4.1-mini",
+    # --- Mid-range ---
+    "z-ai/glm-5-turbo",
+    "anthropic/claude-3.5-haiku",
+    "openai/o4-mini",
     # --- Premium ---
+    "google/gemini-2.5-pro-preview",
     "openai/gpt-4o",
     "anthropic/claude-sonnet-4",
-    "openai/o4-mini",
     "anthropic/claude-3.7-sonnet",
 ]
 
