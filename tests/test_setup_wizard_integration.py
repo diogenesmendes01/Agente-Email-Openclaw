@@ -108,6 +108,47 @@ class TestFirstRunWarnings:
 
         assert any("Gmail" in w for w in warnings_printed)
 
+    def test_shows_warnings_on_accounts_failure(self):
+        """If accounts.run returns accounts without account_id, first_run should warn."""
+        import setup_wizard
+
+        warnings_printed = []
+        # Simulate accounts.run returning accounts without account_id (DB creation failed)
+        gmail_result = [{"email": "a@g.com", "is_corporate": False, "account_num": 1, "hook_token_env": "T"}]
+        accounts_result = [{"email": "a@g.com", "is_corporate": False, "account_num": 1, "hook_token_env": "T"}]  # no account_id
+
+        with patch("setup_steps.dependencies.run", return_value=True), \
+             patch("setup_steps.env_config.run", return_value={"DATABASE_URL": "x"}), \
+             patch("setup_steps.database.run", return_value=True), \
+             patch("setup_steps.telegram.run", return_value=True), \
+             patch("setup_steps.env_config.write_env_file"), \
+             patch("setup_steps.gmail.run", return_value=gmail_result), \
+             patch("setup_steps.accounts.run", return_value=accounts_result), \
+             patch("setup_steps.playbooks.run", return_value=True), \
+             patch("setup_steps.common.warning", side_effect=lambda msg: warnings_printed.append(msg)):
+            setup_wizard.first_run()
+
+        assert any("Contas" in w for w in warnings_printed)
+
+    def test_shows_warnings_on_playbooks_failure(self):
+        """If playbooks.run returns False, first_run should warn."""
+        import setup_wizard
+
+        warnings_printed = []
+
+        with patch("setup_steps.dependencies.run", return_value=True), \
+             patch("setup_steps.env_config.run", return_value={"DATABASE_URL": "x"}), \
+             patch("setup_steps.database.run", return_value=True), \
+             patch("setup_steps.telegram.run", return_value=True), \
+             patch("setup_steps.env_config.write_env_file"), \
+             patch("setup_steps.gmail.run", return_value=[{"email": "a@g.com", "is_corporate": True, "account_num": 1, "hook_token_env": "T"}]), \
+             patch("setup_steps.accounts.run", return_value=[{"email": "a@g.com", "is_corporate": True, "account_num": 1, "hook_token_env": "T", "account_id": 1, "company_id": 1}]), \
+             patch("setup_steps.playbooks.run", return_value=False), \
+             patch("setup_steps.common.warning", side_effect=lambda msg: warnings_printed.append(msg)):
+            setup_wizard.first_run()
+
+        assert any("Playbooks" in w for w in warnings_printed)
+
 
 class TestValidationDoesNotCrash:
     """Validation should handle missing services gracefully."""

@@ -1,7 +1,7 @@
 """Tests for setup_steps/env_config.py."""
 import pytest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, call
 
 
 class TestBuildDatabaseUrl:
@@ -49,3 +49,23 @@ class TestWriteEnvFile:
         backup = tmp_path / ".env.backup"
         assert backup.exists()
         assert backup.read_text() == "OLD=value\n"
+
+
+class TestTelegramTokenMasked:
+    """TELEGRAM_BOT_TOKEN must be collected via ask_password, not ask."""
+
+    def test_bot_token_uses_ask_password(self, tmp_path):
+        """run() should call ask_password for the Telegram bot token."""
+        from setup_steps import env_config
+
+        original_dir = env_config.Path  # just need to mock calls
+        with patch("setup_steps.env_config.ask", return_value="default_val"), \
+             patch("setup_steps.env_config.ask_password", return_value="secret_token") as mock_ask_pw, \
+             patch("setup_steps.env_config.confirm", return_value=False), \
+             patch("setup_steps.env_config.write_env_file"):
+            env = env_config.run(tmp_path)
+
+        # ask_password should have been called with a prompt containing "Token do Bot"
+        bot_token_calls = [c for c in mock_ask_pw.call_args_list if "Token do Bot" in str(c)]
+        assert len(bot_token_calls) >= 1, "TELEGRAM_BOT_TOKEN should use ask_password"
+        assert env["TELEGRAM_BOT_TOKEN"] == "secret_token"

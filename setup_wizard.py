@@ -88,9 +88,12 @@ def first_run():
 
     # Step 6: Accounts in DB
     gmail_accounts = accounts.run(PROJECT_DIR, env, gmail_accounts)
+    if gmail_accounts and not all(a.get("account_id") for a in gmail_accounts):
+        warnings.append("Contas no banco (algumas não foram criadas)")
 
     # Step 7: Playbooks
-    playbooks.run(PROJECT_DIR, gmail_accounts)
+    if not playbooks.run(PROJECT_DIR, gmail_accounts):
+        warnings.append("Playbooks")
 
     # Summary
     print()

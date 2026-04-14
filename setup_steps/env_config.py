@@ -130,7 +130,7 @@ def run(project_dir: Path, existing: dict = None) -> dict:
     # --- Telegram ---
     print()
     success("Telegram")
-    env["TELEGRAM_BOT_TOKEN"] = ask("Token do Bot", default=defaults.get("TELEGRAM_BOT_TOKEN", ""))
+    env["TELEGRAM_BOT_TOKEN"] = ask_password("Token do Bot") or defaults.get("TELEGRAM_BOT_TOKEN", "")
     env["TELEGRAM_CHAT_ID"] = ask("Chat ID", default=defaults.get("TELEGRAM_CHAT_ID", ""))
     env["TELEGRAM_WEBHOOK_SECRET"] = ask(
         "Webhook Secret", default=defaults.get("TELEGRAM_WEBHOOK_SECRET", uuid.uuid4().hex[:16])

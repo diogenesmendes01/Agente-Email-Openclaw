@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     summary TEXT,
     reasoning_tokens INT DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(account_id, email_id)
+    CONSTRAINT idx_decisions_account_email UNIQUE(account_id, email_id)
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -174,5 +174,5 @@ CREATE TABLE IF NOT EXISTS playbooks (
     active BOOLEAN DEFAULT true,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(company_id, trigger_description)
+    CONSTRAINT idx_playbooks_company_trigger UNIQUE(company_id, trigger_description)
 );
