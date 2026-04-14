@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-import requests
-
 from setup_steps.common import (
     step_header, ask, confirm, success, error, warning, spinner,
 )
@@ -13,6 +11,7 @@ TELEGRAM_API = "https://api.telegram.org/bot{token}"
 
 def validate_token(token: str) -> dict | None:
     """Call getMe to validate a bot token. Returns bot info or None."""
+    import requests
     try:
         resp = requests.get(f"{TELEGRAM_API.format(token=token)}/getMe", timeout=10)
         data = resp.json()
@@ -25,6 +24,7 @@ def validate_token(token: str) -> dict | None:
 
 def _flush_old_updates(token: str):
     """Flush old updates so discover_chat_id only sees fresh ones."""
+    import requests
     try:
         resp = requests.get(
             f"{TELEGRAM_API.format(token=token)}/getUpdates",
@@ -44,6 +44,7 @@ def _flush_old_updates(token: str):
 
 def discover_chat_id(token: str) -> tuple:
     """Call getUpdates and return (chat_id, title) from the most recent group/supergroup message."""
+    import requests
     try:
         resp = requests.get(
             f"{TELEGRAM_API.format(token=token)}/getUpdates",
