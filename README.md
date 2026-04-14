@@ -18,7 +18,7 @@ cd Agente-Email-Openclaw
 python setup_wizard.py
 ```
 
-O wizard instala as dependencias Python automaticamente e guia voce por todas as etapas de configuracao interativamente (PostgreSQL, Telegram, Gmail OAuth, playbooks).
+O wizard cria um ambiente virtual (`.venv/`) automaticamente, instala as dependencias Python e guia voce por todas as etapas de configuracao interativamente (PostgreSQL, Telegram, Gmail OAuth, playbooks).
 
 ## Arquitetura
 

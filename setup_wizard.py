@@ -13,6 +13,33 @@ import sys
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent
+VENV_DIR = PROJECT_DIR / ".venv"
+
+
+def ensure_venv():
+    """Create a venv and re-exec into it if we're not already inside one.
+
+    Modern Debian/Ubuntu mark the system Python as externally-managed,
+    so pip install outside a venv fails. This function transparently
+    creates .venv/ and re-launches the wizard inside it.
+    """
+    # Already inside our venv — nothing to do
+    if sys.prefix != sys.base_prefix:
+        return
+
+    if not VENV_DIR.exists():
+        print("  Criando ambiente virtual (.venv)...")
+        subprocess.check_call([sys.executable, "-m", "venv", str(VENV_DIR)])
+
+    # Determine the venv python path
+    if sys.platform == "win32":
+        venv_python = str(VENV_DIR / "Scripts" / "python.exe")
+    else:
+        venv_python = str(VENV_DIR / "bin" / "python")
+
+    # Re-exec this script inside the venv (replaces current process)
+    import os
+    os.execv(venv_python, [venv_python] + sys.argv)
 
 
 def ensure_bootstrap_deps():
@@ -271,6 +298,7 @@ def run_validation(env: dict):
 
 
 def main():
+    ensure_venv()
     ensure_bootstrap_deps()
 
     from setup_steps.common import banner, warning
