@@ -35,16 +35,25 @@ class JobQueue:
             )
 
     async def get_pending(self, limit: int = 10) -> List[Dict]:
-        """Get pending jobs that are ready for retry."""
+        """Get pending jobs ready for retry. Uses FOR UPDATE SKIP LOCKED + status='processing'
+        to prevent multiple workers from picking the same job."""
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """SELECT * FROM failed_jobs
-                   WHERE status = 'pending' AND next_retry_at <= NOW()
-                   ORDER BY next_retry_at ASC
-                   LIMIT $1""",
-                limit,
-            )
-            return [dict(r) for r in rows]
+            async with conn.transaction():
+                rows = await conn.fetch(
+                    """SELECT * FROM failed_jobs
+                       WHERE status = 'pending' AND next_retry_at <= NOW()
+                       ORDER BY next_retry_at ASC
+                       LIMIT $1
+                       FOR UPDATE SKIP LOCKED""",
+                    limit,
+                )
+                if rows:
+                    ids = [r["id"] for r in rows]
+                    await conn.execute(
+                        "UPDATE failed_jobs SET status = 'processing' WHERE id = ANY($1::int[])",
+                        ids,
+                    )
+                return [dict(r) for r in rows]
 
     async def mark_completed(self, job_id: int):
         """Mark a job as successfully completed."""
@@ -55,12 +64,14 @@ class JobQueue:
             )
 
     async def mark_failed(self, job_id: int, error: str) -> bool:
-        """Record a failure. Returns True if job is now dead (max attempts reached)."""
+        """Record a failure and return to 'pending' for next retry.
+        Returns True if job is now dead (max attempts reached)."""
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """UPDATE failed_jobs
                    SET attempts = attempts + 1,
                        last_error = $2,
+                       status = 'pending',
                        next_retry_at = NOW() + (POWER(2, attempts + 1) || ' minutes')::INTERVAL
                    WHERE id = $1""",
                 job_id, error,

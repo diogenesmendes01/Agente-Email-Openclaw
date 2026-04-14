@@ -53,7 +53,8 @@ CREATE TABLE decisions (
     action VARCHAR(50),
     summary TEXT,
     reasoning_tokens INT DEFAULT 0,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(account_id, email_id)
 );
 
 CREATE TABLE tasks (
@@ -172,5 +173,6 @@ CREATE TABLE playbooks (
     priority INT DEFAULT 0,
     active BOOLEAN DEFAULT true,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(company_id, trigger_description)
 );

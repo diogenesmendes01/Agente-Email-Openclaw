@@ -70,7 +70,7 @@ class TestDatabaseService:
     @pytest.mark.asyncio
     async def test_log_decision(self, mock_pool):
         pool, conn = mock_pool
-        conn.fetchval.return_value = 42
+        conn.fetchrow.return_value = {"id": 42}
         from orchestrator.services.database_service import DatabaseService
         db = DatabaseService(pool)
         result = await db.log_decision({

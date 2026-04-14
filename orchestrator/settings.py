@@ -62,14 +62,16 @@ class Settings:
         self.funnel_base_url: str = os.environ["FUNNEL_BASE_URL"]
 
         # Gmail accounts: GMAIL_ACCOUNT_N → GMAIL_HOOK_TOKEN_N
+        # Tolerates gaps in numbering (e.g. 1, 3 without 2)
         self.gmail_accounts: dict = {}
         for i in range(1, 20):
             account = os.getenv(f"GMAIL_ACCOUNT_{i}", "").strip()
             token = os.getenv(f"GMAIL_HOOK_TOKEN_{i}", "").strip()
             if account and token:
                 self.gmail_accounts[account] = token
-            else:
-                break
+            elif account and not token:
+                logger.warning(f"GMAIL_ACCOUNT_{i} set but GMAIL_HOOK_TOKEN_{i} missing — skipping")
+            # continue scanning even if a slot is empty
 
         # Learning
         self.learning_interval: int = int(os.getenv("LEARNING_INTERVAL", "50"))

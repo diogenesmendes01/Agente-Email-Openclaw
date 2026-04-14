@@ -254,6 +254,20 @@ docker-compose logs -f  # logs em tempo real
 curl http://localhost:8787/health
 ```
 
+### Passo 7.5: Registrar contas Gmail no banco (OBRIGATORIO)
+
+O schema cria as tabelas, mas **nao insere contas**. Sem esse passo, o pipeline nao consegue vincular emails a uma conta e varias features (playbooks, config, learning) ficam inativas.
+
+```bash
+# Para cada conta Gmail configurada no .env:
+python scripts/seed_account.py \
+  --email seu@email.com \
+  --hook-token-env GMAIL_HOOK_TOKEN_1 \
+  --topic-id 123  # opcional: Telegram topic ID para esta conta
+```
+
+O script e idempotente (re-rodar atualiza em vez de duplicar).
+
 #### Rodar manualmente (desenvolvimento)
 
 ```bash
@@ -338,7 +352,7 @@ python scripts/import_playbooks.py playbooks/minha-empresa.yaml --account-id 1
 
 ```
  1. Webhook recebido (Gmail Pub/Sub)
- 2. Deduplicacao (cache LRU in-memory, 1000 entradas)
+ 2. Deduplicacao (cache LRU in-memory + UNIQUE constraint no DB)
  3. Fetch email via Gmail API (async)
  4. Parse + limpeza + extracao de PDF (se houver anexo)
  5. Buscar contexto:
@@ -348,7 +362,7 @@ python scripts/import_playbooks.py playbooks/minha-empresa.yaml --account-id 1
     d. Sender profile com padroes de correcao (Qdrant)
     e. Regras aprendidas (Qdrant)
  6. Classificar com LLM (prompt enriquecido, max 6000 tokens)
- 7. Check playbooks: se match com auto_respond, gerar e enviar resposta
+ 7. Check playbooks: se match com auto_respond e confidence >= 70%, gerar e enviar resposta
  8. Resumir com LLM
  9. Decidir acao com LLM (com tom/assinatura da empresa)
 10. Persistir decisao (PostgreSQL + Qdrant)
@@ -361,7 +375,7 @@ python scripts/import_playbooks.py playbooks/minha-empresa.yaml --account-id 1
 ## Testes
 
 ```bash
-# Rodar todos os testes (98 testes)
+# Rodar todos os testes
 python -m pytest tests/ -v
 
 # Testes especificos
@@ -438,7 +452,8 @@ Agente-Email-Openclaw/
 +-- scripts/
 |   +-- gmail_auth.py                        # Setup OAuth para contas Gmail
 |   +-- gmail_watch.py                       # Ativar Gmail Watch (Pub/Sub)
-|   +-- import_playbooks.py                  # Importar playbooks de YAML
+|   +-- seed_account.py                      # Registrar conta Gmail no banco (obrigatorio)
+|   +-- import_playbooks.py                  # Importar playbooks de YAML (idempotente)
 |   +-- migrate_feedback.py                  # Migracao feedback.json -> Qdrant
 +-- credentials/                             # Tokens OAuth (nao commitado)
 +-- docker-compose.yml                       # 3 containers (postgres, qdrant, orchestrator)

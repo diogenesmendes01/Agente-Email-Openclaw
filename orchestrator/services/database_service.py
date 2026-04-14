@@ -168,13 +168,14 @@ class DatabaseService:
     # ── Decisions ──
 
     async def log_decision(self, data: Dict) -> int:
-        """Log email processing decision."""
+        """Log email processing decision. Idempotent: duplicate (account_id, email_id) is silently skipped."""
         async with self._pool.acquire() as conn:
-            return await conn.fetchval(
+            row = await conn.fetchrow(
                 """INSERT INTO decisions
                    (account_id, email_id, subject, sender, classification,
                     priority, category, action, summary, reasoning_tokens)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                   ON CONFLICT (account_id, email_id) DO NOTHING
                    RETURNING id""",
                 data.get("account_id"),
                 data.get("email_id"),
@@ -186,6 +187,13 @@ class DatabaseService:
                 data.get("acao", data.get("action", "")),
                 data.get("resumo", data.get("summary", "")),
                 data.get("reasoning_tokens", 0),
+            )
+            if row:
+                return row["id"]
+            # Already exists — fetch existing id
+            return await conn.fetchval(
+                "SELECT id FROM decisions WHERE account_id = $1 AND email_id = $2",
+                data.get("account_id"), data.get("email_id"),
             )
 
     # ── Tasks ──
@@ -344,11 +352,17 @@ class DatabaseService:
             return [dict(r) for r in rows]
 
     async def create_playbook(self, company_id, trigger_description, response_template, auto_respond=True, priority=0):
-        """Create a new playbook."""
+        """Create a new playbook. Idempotent: updates if (company_id, trigger_description) already exists."""
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """INSERT INTO playbooks (company_id, trigger_description, response_template, auto_respond, priority)
-                   VALUES ($1, $2, $3, $4, $5) RETURNING id""",
+                   VALUES ($1, $2, $3, $4, $5)
+                   ON CONFLICT (company_id, trigger_description) DO UPDATE SET
+                       response_template = EXCLUDED.response_template,
+                       auto_respond = EXCLUDED.auto_respond,
+                       priority = EXCLUDED.priority,
+                       updated_at = NOW()
+                   RETURNING id""",
                 company_id, trigger_description, response_template, auto_respond, priority,
             )
             return row["id"]

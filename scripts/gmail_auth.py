@@ -73,6 +73,20 @@ def authenticate(account: str):
         flow = InstalledAppFlow.from_client_secrets_file(str(client_secret), SCOPES)
         creds = flow.run_local_server(port=0)
 
+    # Validate that the authenticated account matches --account
+    try:
+        from googleapiclient.discovery import build
+        service = build("gmail", "v1", credentials=creds)
+        profile = service.users().getProfile(userId="me").execute()
+        authenticated_email = profile.get("emailAddress", "").lower()
+        if authenticated_email != account.lower():
+            print(f"\nERRO: Voce autenticou com '{authenticated_email}' mas --account e '{account}'")
+            print("O token NAO foi salvo. Tente novamente com a conta correta.")
+            sys.exit(1)
+    except Exception as e:
+        print(f"\nAVISO: Nao foi possivel verificar a conta autenticada: {e}")
+        print("Verifique manualmente se o login foi feito com a conta correta.")
+
     # Salvar token
     with open(token_file, "w") as f:
         f.write(creds.to_json())
