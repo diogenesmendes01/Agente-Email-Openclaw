@@ -220,6 +220,18 @@ class EmailProcessor:
             # Se classificado como não importante com alta confiança, pular processamento
             if not classification.get("importante") and classification.get("confianca", 0) >= 0.8:
                 logger.info(f"[{email_id}] Email não importante, pulando...")
+                # Fill in the claimed decision row so it's not a ghost skeleton
+                if decision_id:
+                    await self.db.update_decision(decision_id, {
+                        "subject": email.get("subject", ""),
+                        "from": email.get("from", ""),
+                        "classificacao": classification.get("categoria", "outro"),
+                        "prioridade": classification.get("prioridade", "Baixa"),
+                        "categoria": classification.get("categoria", "outro"),
+                        "acao": "ignorar",
+                        "resumo": "Email não importante — processamento pulado",
+                        "reasoning_tokens": classification.get("reasoning_tokens", 0),
+                    })
                 result["status"] = "skipped"
                 result["reason"] = "Email não importante"
                 return result
@@ -361,6 +373,15 @@ class EmailProcessor:
             logger.error(f"[{email_id}] Erro no processamento: {e}", exc_info=True)
             result["status"] = "error"
             result["error"] = str(e)
+
+            # Release the claim so retries can re-claim this email.
+            # Without this, the skeleton row blocks all future attempts.
+            if result.get("decision_id"):
+                try:
+                    await self.db.release_claim(result["decision_id"])
+                    logger.info(f"[{email_id}] Released claim (decision #{result['decision_id']}) for retry")
+                except Exception as rel_err:
+                    logger.error(f"[{email_id}] Failed to release claim: {rel_err}")
 
             # Enqueue for retry (only on first failure, not during retry worker reprocessing)
             if self.job_queue and not _is_retry:

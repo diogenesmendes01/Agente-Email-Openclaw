@@ -354,6 +354,88 @@ def test_get_pending_updates_next_retry_at_on_claim():
     )
 
 
+@pytest.mark.asyncio
+async def test_claim_released_on_processing_error():
+    """If processing fails after claim, the skeleton row must be deleted so retries work."""
+    from orchestrator.handlers.email_processor import EmailProcessor
+    db = AsyncMock()
+    qdrant = MagicMock()
+    qdrant.is_connected.return_value = False
+    llm = AsyncMock()
+    gmail = AsyncMock()
+    telegram = AsyncMock()
+
+    proc = EmailProcessor(db, qdrant, llm, gmail, telegram)
+
+    gmail.get_email.return_value = {
+        "id": "em1", "from": "s@t.com", "from_email": "s@t.com",
+        "from_name": "S", "subject": "Sub", "body": "Hello",
+        "body_clean": "", "attachments": [], "threadId": "t1", "date": "2026-04-14",
+    }
+    db.get_account.return_value = {"id": 1}
+    db.claim_email.return_value = 99  # claim succeeds
+
+    # Make classify blow up to trigger the except path
+    llm.classify_email.side_effect = RuntimeError("LLM unavailable")
+
+    result = await proc.process_email("em1", "u@t.com")
+    assert result["status"] == "error"
+    # The skeleton row must have been released
+    db.release_claim.assert_called_once_with(99)
+
+
+@pytest.mark.asyncio
+async def test_skipped_email_fills_decision_row():
+    """When email is skipped (not important), the decision row must be filled, not left as skeleton."""
+    from orchestrator.handlers.email_processor import EmailProcessor
+    db = AsyncMock()
+    qdrant = MagicMock()
+    qdrant.is_connected.return_value = False
+    llm = AsyncMock()
+    gmail = AsyncMock()
+    telegram = AsyncMock()
+
+    proc = EmailProcessor(db, qdrant, llm, gmail, telegram)
+
+    gmail.get_email.return_value = {
+        "id": "em1", "from": "news@spam.com", "from_email": "news@spam.com",
+        "from_name": "Newsletter", "subject": "Weekly digest", "body": "Unsubscribe",
+        "body_clean": "", "attachments": [], "threadId": "t1", "date": "2026-04-14",
+    }
+    db.get_account.return_value = {"id": 1}
+    db.claim_email.return_value = 77  # claim succeeds
+
+    # Classify as not important with high confidence → triggers "skipped" path
+    llm.classify_email.return_value = {
+        "importante": False, "confianca": 0.95,
+        "categoria": "newsletter", "prioridade": "Baixa",
+        "reasoning_tokens": 50,
+    }
+
+    result = await proc.process_email("em1", "u@t.com")
+    assert result["status"] == "skipped"
+    # The decision row must have been updated with classification data
+    db.update_decision.assert_called_once()
+    call_args = db.update_decision.call_args
+    assert call_args[0][0] == 77  # decision_id
+    data = call_args[0][1]
+    assert data["acao"] == "ignorar"
+    assert data["classificacao"] == "newsletter"
+
+
+@pytest.mark.asyncio
+async def test_release_claim_deletes_row(mock_pool):
+    """release_claim should DELETE the skeleton decision row."""
+    pool, conn = mock_pool
+    from orchestrator.services.database_service import DatabaseService
+    db = DatabaseService(pool)
+    await db.release_claim(42)
+    conn.execute.assert_called_once()
+    call_sql = conn.execute.call_args[0][0]
+    assert "DELETE" in call_sql
+    assert "decisions" in call_sql
+
+
 def test_gmail_accounts_slot_20():
     """Settings should load GMAIL_ACCOUNT_20 (range must go to 21)."""
     env = {

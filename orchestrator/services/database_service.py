@@ -205,6 +205,17 @@ class DatabaseService:
                 data.get("reasoning_tokens", 0),
             )
 
+    async def release_claim(self, decision_id: int):
+        """Delete a skeleton decision row so the email can be retried.
+
+        Called when processing fails after claim_email() succeeded — without
+        this, the UNIQUE constraint would block all future retry attempts.
+        """
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM decisions WHERE id = $1", decision_id
+            )
+
     # ── Tasks ──
 
     async def create_task(
