@@ -4,14 +4,21 @@ Sistema inteligente de automacao de emails com IA que classifica, resume, decide
 
 ## Quick Start
 
+### 1. Instalar dependencias do sistema (Ubuntu/Debian)
+
 ```bash
-# Clone e rode o wizard de setup interativo:
-git clone <repo-url>
+apt update && apt install -y python3 python3-pip python3-venv python-is-python3 git
+```
+
+### 2. Clonar e rodar o wizard
+
+```bash
+git clone https://github.com/diogenesmendes01/Agente-Email-Openclaw.git
 cd Agente-Email-Openclaw
 python setup_wizard.py
 ```
 
-O wizard guia você por todas as etapas de configuração interativamente.
+O wizard instala as dependencias Python automaticamente e guia voce por todas as etapas de configuracao interativamente (PostgreSQL, Telegram, Gmail OAuth, playbooks).
 
 ## Arquitetura
 
@@ -110,13 +117,25 @@ O Telegram usa **webhook** (nao long-polling) com confirmacao para acoes perigos
 
 ### Pre-requisitos
 
+#### Pacotes do sistema (Ubuntu/Debian)
+
+```bash
+apt update && apt install -y python3 python3-pip python3-venv python-is-python3 git curl
+```
+
+> **Nota:** O wizard (`setup_wizard.py`) instala automaticamente as dependencias Python (`requirements.txt`), incluindo `rich`, `python-dotenv`, `psycopg2-binary`, `requests`, etc. Voce nao precisa rodar `pip install` manualmente.
+
+#### Servicos externos
+
 | Ferramenta | Para que serve | Como instalar |
 |------------|---------------|---------------|
-| **Python 3.11+** | Rodar o agente | [python.org/downloads](https://www.python.org/downloads/) |
-| **Docker + Docker Compose** | Rodar PostgreSQL, Qdrant e o orchestrator | [docs.docker.com/get-docker](https://docs.docker.com/get-docker/) |
+| **Python 3.11+** | Rodar o agente | `apt install python3` ou [python.org/downloads](https://www.python.org/downloads/) |
+| **PostgreSQL 14+** | Banco relacional principal | `apt install postgresql` ou via Docker |
+| **Docker + Docker Compose** (opcional) | Rodar PostgreSQL, Qdrant e o orchestrator em containers | [docs.docker.com/get-docker](https://docs.docker.com/get-docker/) |
 | **Google Cloud CLI (gcloud)** | Configurar Gmail API e Pub/Sub | [cloud.google.com/sdk/docs/install](https://cloud.google.com/sdk/docs/install) |
 | **Tailscale** | Expor webhook via HTTPS (Funnel) | [tailscale.com/download](https://tailscale.com/download) |
-| **Git** | Clonar o repositorio | [git-scm.com/downloads](https://git-scm.com/downloads) |
+
+> **PostgreSQL:** pode ser instalado direto na VPS (`apt install postgresql`) ou rodado via Docker. O wizard configura o banco independente de como ele foi instalado — basta fornecer a `DATABASE_URL` correta.
 
 ### Passo 1: Clonar o repositorio
 
@@ -372,7 +391,7 @@ python scripts/import_playbooks.py playbooks/minha-empresa.yaml --account-id 1
 ## Testes
 
 ```bash
-# Rodar todos os testes (98 testes)
+# Rodar todos os testes (195 testes)
 python -m pytest tests/ -v
 
 # Testes especificos
@@ -421,10 +440,21 @@ Agente-Email-Openclaw/
 |       +-- text_cleaner.py                  # Limpeza de texto
 |       +-- pdf_reader.py                    # Extracao de texto de PDFs
 +-- sql/
-|   +-- schema.sql                           # Schema PostgreSQL (13 tabelas)
+|   +-- schema.sql                           # Schema PostgreSQL (14 tabelas)
 |   +-- migrations/
 |       +-- 001_phase3_4_tables.sql          # Migração Phase 3+4 (bancos existentes)
-+-- tests/                                   # 98 testes
+|       +-- 002_idempotency_constraints.sql  # Dedup + UNIQUE constraints
++-- setup_wizard.py                              # Wizard de setup interativo
++-- setup_steps/                                 # Modulos do wizard
+|   +-- common.py                                # UI helpers (rich, prompts)
+|   +-- dependencies.py                          # Instalar requirements.txt
+|   +-- env_config.py                            # Gerar .env interativamente
+|   +-- database.py                              # Criar banco + rodar migrations
+|   +-- telegram.py                              # Validar bot + descobrir chat_id
+|   +-- gmail.py                                 # OAuth + Gmail Watch
+|   +-- accounts.py                              # Criar contas no banco
+|   +-- playbooks.py                             # Importar playbooks de YAML
++-- tests/                                   # 195 testes
 |   +-- conftest.py                          # Fixtures compartilhados
 |   +-- test_database_service.py             # 15 testes
 |   +-- test_telegram_service.py             # 5 testes
@@ -481,13 +511,17 @@ O banco possui 13 tabelas, criadas automaticamente pelo `sql/schema.sql`:
 
 ### Migracoes (bancos existentes)
 
-Se o banco ja existe com tabelas da Phase 1-2, rode a migracao para criar as tabelas da Phase 3+4:
+Se o banco ja existe com tabelas de versoes anteriores, rode as migracoes:
 
 ```bash
+# Phase 3+4: tabelas de pending_actions, company_profiles, playbooks, etc.
 psql $DATABASE_URL -f sql/migrations/001_phase3_4_tables.sql
+
+# Idempotencia: dedup de decisions/playbooks + constraints UNIQUE + NOT NULL
+psql $DATABASE_URL -f sql/migrations/002_idempotency_constraints.sql
 ```
 
-O script usa `CREATE TABLE IF NOT EXISTS` e `ADD COLUMN IF NOT EXISTS`, entao e seguro rodar mais de uma vez.
+Os scripts sao idempotentes (`IF NOT EXISTS`, dedup antes de criar constraints), entao e seguro rodar mais de uma vez. O `setup_wizard.py` aplica todas as migracoes automaticamente.
 
 ## Troubleshooting
 
