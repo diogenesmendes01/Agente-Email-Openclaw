@@ -63,7 +63,9 @@ class TelegramService:
         summary: Dict[str, Any],
         action: Dict[str, Any],
         topic_id: Optional[int] = 11,
-        reasoning_tokens: int = 0
+        reasoning_tokens: int = 0,
+        account: str = "",
+        auto_responded: bool = False,
     ) -> Optional[int]:
         """Envia notificação formatada. Mensagens longas são divididas."""
 
@@ -72,7 +74,9 @@ class TelegramService:
             return None
 
         text = self._format_message(email, classification, summary, action, reasoning_tokens)
-        reply_markup = self._create_keyboard(email, action)
+        if auto_responded:
+            text += "\n\n✅ <b>Auto-respondido via playbook</b>"
+        reply_markup = self._create_keyboard(email, account, auto_responded=auto_responded)
 
         # Se mensagem cabe no limite, enviar normalmente
         if len(text) <= self.MAX_MESSAGE_LENGTH:
@@ -243,37 +247,46 @@ class TelegramService:
         
         return "\n".join(lines)
     
-    def _create_keyboard(self, email: Dict[str, Any], action: Dict[str, Any]) -> Dict:
-        """Cria teclado inline com todos os botões"""
+    def _create_keyboard(self, email: Dict[str, Any], account: str, auto_responded: bool = False) -> Dict:
+        """Cria teclado inline com todos os botões.
+
+        When auto_responded=True, reply/draft buttons are omitted to prevent
+        sending a duplicate response for an email already answered by playbook.
+        """
         email_id = email.get("id", "")
-        account = action.get("account", os.getenv("GOG_HOOK_ACCOUNT", ""))
-        sender = email.get("from_email", "") or email.get("from", "")
-        
-        # Callback data simplificado: action:email_id:account (sem truncar)
-        # Sender será extraído da mensagem original quando necessário
-        keyboard = [
-            [
+
+        keyboard = []
+        if not auto_responded:
+            keyboard.append([
                 {"text": "✉️ Enviar rascunho", "callback_data": f"send_draft:{email_id}:{account}"},
-                {"text": "📝 Criar tarefa", "callback_data": f"create_task:{email_id}:{account}"}
-            ],
-            [
+                {"text": "📝 Criar tarefa", "callback_data": f"create_task:{email_id}:{account}"},
+            ])
+            keyboard.append([
                 {"text": "✅ Arquivar", "callback_data": f"archive:{email_id}:{account}"},
-                {"text": "⭐ Marcar VIP", "callback_data": f"vip:{email_id}:{account}"}
-            ],
-            [
+                {"text": "⭐ Marcar VIP", "callback_data": f"vip:{email_id}:{account}"},
+            ])
+            keyboard.append([
                 {"text": "💬 Responder custom", "callback_data": f"custom_reply:{email_id}:{account}"},
-                {"text": "🔄 Reclassificar", "callback_data": f"reclassify:{email_id}:{account}"}
-            ],
-            [
+                {"text": "🔄 Reclassificar", "callback_data": f"reclassify:{email_id}:{account}"},
+            ])
+            keyboard.append([
                 {"text": "🔇 Silenciar", "callback_data": f"silence:{email_id}:{account}"},
-                {"text": "🗑️ Spam", "callback_data": f"spam:{email_id}:{account}"}
-            ],
-            [
-                {"text": "🔗 Abrir no Gmail", 
-                 "url": f"https://mail.google.com/mail/u/0/#inbox/{email_id}"}
-            ]
-        ]
-        
+                {"text": "🗑️ Spam", "callback_data": f"spam:{email_id}:{account}"},
+            ])
+        else:
+            # Auto-responded: only offer non-reply actions
+            keyboard.append([
+                {"text": "✅ Arquivar", "callback_data": f"archive:{email_id}:{account}"},
+                {"text": "📝 Criar tarefa", "callback_data": f"create_task:{email_id}:{account}"},
+            ])
+            keyboard.append([
+                {"text": "⭐ Marcar VIP", "callback_data": f"vip:{email_id}:{account}"},
+                {"text": "🔄 Reclassificar", "callback_data": f"reclassify:{email_id}:{account}"},
+            ])
+        keyboard.append([
+            {"text": "🔗 Abrir no Gmail", "url": f"https://mail.google.com/mail/u/0/#inbox/{email_id}"},
+        ])
+
         return {"inline_keyboard": keyboard}
     
     async def send_confirmation(

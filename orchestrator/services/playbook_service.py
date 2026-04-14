@@ -8,6 +8,8 @@ logger = logging.getLogger(__name__)
 class PlaybookService:
     """Matches incoming emails against company playbooks."""
 
+    MIN_CONFIDENCE = 0.7  # Reject matches below this threshold
+
     def __init__(self, db, llm):
         self.db = db
         self.llm = llm
@@ -26,9 +28,19 @@ class PlaybookService:
             return None
 
         match_result = await self.llm.match_playbook(email_body, email_subject, playbooks)
-        matched_id = match_result.get("matched_id") if match_result else None
+        if not match_result:
+            return None
+
+        matched_id = match_result.get("matched_id")
+        confidence = match_result.get("confidence", 0.0)
 
         if not matched_id:
+            return None
+
+        if confidence < self.MIN_CONFIDENCE:
+            logger.info(
+                f"Playbook #{matched_id} matched but confidence {confidence:.2f} < {self.MIN_CONFIDENCE} — skipping"
+            )
             return None
 
         matched = next((p for p in playbooks if p["id"] == matched_id), None)
@@ -40,6 +52,7 @@ class PlaybookService:
             "template": matched["response_template"],
             "trigger": matched["trigger_description"],
             "auto_respond": matched.get("auto_respond", True),
+            "confidence": confidence,
             "company": company,
         }
 

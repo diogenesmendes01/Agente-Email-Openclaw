@@ -336,7 +336,7 @@ EMAIL ATUAL:
 De: {email.get("from", "")}
 Para: {email.get("to", "")}
 Assunto: {email.get("subject", "")}
-Corpo: {email.get("body", "")[:1500]}
+Corpo: {(email.get("body_clean") or email.get("body", ""))[:1500]}
 
 Responda em JSON:
 {{
@@ -369,7 +369,7 @@ Responda em JSON:
 EMAIL:
 De: {email.get("from", "")}
 Assunto: {email.get("subject", "")}
-Corpo: {email.get("body", "")[:1500]}
+Corpo: {(email.get("body_clean") or email.get("body", ""))[:1500]}
 
 Responda em JSON:
 {{"resumo": "resumo em 1-2 frases", "entidades": {{"cliente": ""}}, "sentimento": "neutro"}}"""

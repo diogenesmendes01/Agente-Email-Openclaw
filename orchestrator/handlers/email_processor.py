@@ -138,8 +138,37 @@ class EmailProcessor:
                 "urgency_words": config.get("urgency_words", []),
                 "ignore_words": config.get("ignore_words", []),
                 "projetos": config.get("projetos", []),
-                "thread_context": thread_context  # Emails anteriores da thread
+                "thread_context": thread_context,  # Emails anteriores da thread
             }
+
+            # Fetch company profile and domain rules for LLM context
+            if account_id:
+                try:
+                    company_profile = await self.db.get_company_profile(account_id)
+                    if company_profile:
+                        # Map DB field names to what LLM prompts expect
+                        context["company_profile"] = {
+                            "nome": company_profile.get("company_name", ""),
+                            "cnpj": company_profile.get("cnpj", ""),
+                            "tom": company_profile.get("tone", "profissional"),
+                            "assinatura": company_profile.get("signature", ""),
+                            "idioma": company_profile.get("language", "pt-BR"),
+                            "whatsapp_url": company_profile.get("whatsapp_url", ""),
+                        }
+                        # Domain rules need company_id from the profile
+                        domain_rules_raw = await self.db.get_domain_rules(company_profile["id"])
+                        if domain_rules_raw:
+                            context["domain_rules"] = [
+                                {
+                                    "dominio": r.get("domain", ""),
+                                    "categoria": r.get("category", ""),
+                                    "prioridade_minima": r.get("min_priority", ""),
+                                    "acao_padrao": r.get("default_action", ""),
+                                }
+                                for r in domain_rules_raw
+                            ]
+                except Exception as e:
+                    logger.warning(f"[{email_id}] Error fetching company profile/domain rules: {e}")
             
             # Buscar emails similares (se Qdrant disponível)
             if self.qdrant.is_connected():
@@ -184,6 +213,7 @@ class EmailProcessor:
                 return result
 
             # 4.5. Check playbooks (if configured)
+            auto_responded = False
             if self.playbook_service and account_id:
                 try:
                     playbook_match = await self.playbook_service.match(
@@ -191,25 +221,27 @@ class EmailProcessor:
                         email_body=email.get("body_clean", ""),
                         email_subject=email.get("subject", ""),
                     )
-                    if playbook_match and playbook_match.get("auto_respond"):
+                    if playbook_match:
                         result["playbook_matched"] = True
                         result["playbook_id"] = playbook_match["playbook_id"]
-                        # Generate and send auto-response
-                        from_name = email.get("from_name", "") or email.get("from", "")
-                        contact_name = from_name.split("<")[0].strip().strip('"') if "<" in from_name else from_name
-                        response_text = await self.playbook_service.generate_response(
-                            template=playbook_match["template"],
-                            company=playbook_match["company"],
-                            contact_name=contact_name,
-                            email_body=email.get("body_clean", ""),
-                        )
-                        if response_text:
-                            to_email = email.get("from_email", "") or email.get("from", "")
-                            await self.gmail.send_reply(
-                                email_id, response_text, account,
-                                to=to_email,
+                        if playbook_match.get("auto_respond"):
+                            # Generate and send auto-response
+                            from_name = email.get("from_name", "") or email.get("from", "")
+                            contact_name = from_name.split("<")[0].strip().strip('"') if "<" in from_name else from_name
+                            response_text = await self.playbook_service.generate_response(
+                                template=playbook_match["template"],
+                                company=playbook_match["company"],
+                                contact_name=contact_name,
+                                email_body=email.get("body_clean", ""),
                             )
-                            logger.info(f"[{email_id}] Auto-responded via playbook #{playbook_match['playbook_id']}")
+                            if response_text:
+                                to_email = email.get("from_email", "") or email.get("from", "")
+                                await self.gmail.send_reply(
+                                    email_id, response_text, account,
+                                    to=to_email,
+                                )
+                                auto_responded = True
+                                logger.info(f"[{email_id}] Auto-responded via playbook #{playbook_match['playbook_id']}")
                 except Exception as e:
                     logger.warning(f"[{email_id}] Playbook check error: {e}")
 
@@ -271,7 +303,9 @@ class EmailProcessor:
                 summary=summary,
                 action=action,
                 topic_id=topic_id,
-                reasoning_tokens=total_reasoning_tokens
+                reasoning_tokens=total_reasoning_tokens,
+                account=account,
+                auto_responded=auto_responded,
             )
             result["telegram_message_id"] = message_id
             result["reasoning_tokens"] = total_reasoning_tokens

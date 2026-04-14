@@ -60,7 +60,10 @@ async def _start_config_identidade(chat_id, topic_id, actor_id, db, tg):
     """Start identity configuration conversation."""
     thread_id = topic_id if topic_id != chat_id else None
     account = await db.get_account_by_topic(topic_id)
-    account_id = account["id"] if account else None
+    if not account:
+        await tg.send_text(chat_id, "❌ Conta não encontrada para este tópico. Vincule uma conta primeiro.", thread_id=thread_id)
+        return
+    account_id = account["id"]
     await db.create_pending_action(
         account_id, "config", "config_identidade", actor_id, chat_id, None,
         {"step": "company_name"}, topic_id=topic_id,
@@ -75,7 +78,10 @@ async def _start_config_playbook(chat_id, topic_id, actor_id, db, tg):
     """Start playbook creation conversation."""
     thread_id = topic_id if topic_id != chat_id else None
     account = await db.get_account_by_topic(topic_id)
-    account_id = account["id"] if account else None
+    if not account:
+        await tg.send_text(chat_id, "❌ Conta não encontrada para este tópico. Vincule uma conta primeiro.", thread_id=thread_id)
+        return
+    account_id = account["id"]
     await db.create_pending_action(
         account_id, "config", "config_playbook", actor_id, chat_id, None,
         {"step": "trigger"}, topic_id=topic_id,
