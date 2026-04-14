@@ -118,9 +118,12 @@ async def lifespan(app_instance):
     import asyncio
 
     async def retry_worker():
-        """Retries failed jobs every 60 seconds."""
+        """Retries failed jobs every 60 seconds. Also reaps stuck processing jobs."""
         while True:
             try:
+                # Recover jobs stuck in 'processing' from crashed workers
+                await job_queue.reap_stuck_processing(timeout_minutes=15)
+
                 jobs = await job_queue.get_pending(limit=5)
                 for job in jobs:
                     try:

@@ -311,6 +311,52 @@ def test_gmail_auth_validates_even_with_valid_token():
     assert found_valid_check, "Should have a creds.valid check"
 
 
+@pytest.mark.asyncio
+async def test_decision_exists_method(mock_pool):
+    """DatabaseService.decision_exists should check for existing decisions."""
+    pool, conn = mock_pool
+    conn.fetchval.return_value = True
+
+    from orchestrator.services.database_service import DatabaseService
+    db = DatabaseService(pool)
+    result = await db.decision_exists(1, "email123")
+    assert result is True
+    conn.fetchval.assert_called_once()
+    call_sql = conn.fetchval.call_args[0][0]
+    assert "decisions" in call_sql
+    assert "account_id" in call_sql
+    assert "email_id" in call_sql
+
+
+def test_early_dedup_check_before_playbook():
+    """EmailProcessor must check decision_exists BEFORE the playbook block."""
+    import inspect
+    from orchestrator.handlers.email_processor import EmailProcessor
+    source = inspect.getsource(EmailProcessor.process_email)
+    dedup_pos = source.index("decision_exists")
+    playbook_pos = source.index("playbook_service")
+    assert dedup_pos < playbook_pos, (
+        "decision_exists check must come before playbook_service usage "
+        "to prevent duplicate auto-responses"
+    )
+
+
+def test_reap_stuck_called_in_retry_worker():
+    """retry_worker in main.py should call reap_stuck_processing."""
+    main_path = os.path.join(os.path.dirname(__file__), "..", "orchestrator", "main.py")
+    with open(main_path) as f:
+        source = f.read()
+    # Find the retry_worker function
+    assert "reap_stuck_processing" in source, "main.py must call reap_stuck_processing"
+    # It should be inside retry_worker
+    worker_start = source.index("async def retry_worker")
+    worker_end = source.index("async def maintenance_worker")
+    worker_body = source[worker_start:worker_end]
+    assert "reap_stuck_processing" in worker_body, (
+        "reap_stuck_processing must be called inside retry_worker"
+    )
+
+
 def test_gmail_accounts_slot_20():
     """Settings should load GMAIL_ACCOUNT_20 (range must go to 21)."""
     env = {

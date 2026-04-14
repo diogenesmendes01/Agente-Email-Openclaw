@@ -61,6 +61,7 @@ async def test_pipeline_passes_account_to_notification():
         "body_clean": "", "attachments": [], "threadId": "t1", "date": "2026-04-14",
     }
     db.get_account.return_value = {"id": 1}
+    db.decision_exists.return_value = False
     db.get_account_config.return_value = {"vips": [], "telegram_topic": 11}
     llm.classify_email.return_value = {"prioridade": "Média", "importante": True, "confianca": 0.8, "categoria": "outro"}
     llm.summarize_email.return_value = {"resumo": "Test"}
@@ -187,6 +188,7 @@ async def test_pipeline_fetches_company_profile_and_domain_rules():
         "body_clean": "", "attachments": [], "threadId": "t1", "date": "2026-04-14",
     }
     db.get_account.return_value = {"id": 1}
+    db.decision_exists.return_value = False
     db.get_account_config.return_value = {"vips": [], "telegram_topic": 11}
     db.get_company_profile.return_value = {
         "id": 5, "company_name": "CodeWave", "cnpj": "12345",
@@ -343,6 +345,7 @@ async def test_pipeline_auto_responded_marks_notification():
         "body_clean": "", "attachments": [], "threadId": "t1", "date": "2026-04-14",
     }
     db.get_account.return_value = {"id": 1}
+    db.decision_exists.return_value = False
     db.get_account_config.return_value = {"vips": [], "telegram_topic": 11}
     llm.classify_email.return_value = {"prioridade": "Média", "importante": True, "confianca": 0.8, "categoria": "financeiro"}
     llm.summarize_email.return_value = {"resumo": "Boleto request"}

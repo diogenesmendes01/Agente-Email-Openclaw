@@ -132,7 +132,14 @@ class EmailProcessor:
             # Fetch account_id early (needed for playbook check and later DB ops)
             account_data = await self.db.get_account(account)
             account_id = account_data["id"] if account_data else None
-            
+
+            # Early dedup: if this email was already processed, skip everything
+            # including playbook auto-response, classification, actions, and notifications.
+            if account_id and await self.db.decision_exists(account_id, email_id):
+                logger.info(f"[{email_id}] Already processed (decision exists) — skipping entire pipeline")
+                result["status"] = "duplicate"
+                return result
+
             context = {
                 "vips": config.get("vips", []),
                 "urgency_words": config.get("urgency_words", []),

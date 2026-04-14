@@ -14,6 +14,9 @@ def processor():
     telegram = AsyncMock()
     playbook_svc = AsyncMock()
 
+    # decision_exists must return False for non-duplicate tests
+    db.decision_exists.return_value = False
+
     proc = EmailProcessor(db, qdrant, llm, gmail, telegram, playbook_service=playbook_svc)
     return proc
 

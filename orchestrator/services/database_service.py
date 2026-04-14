@@ -167,6 +167,14 @@ class DatabaseService:
 
     # ── Decisions ──
 
+    async def decision_exists(self, account_id: int, email_id: str) -> bool:
+        """Check if a decision already exists for this (account_id, email_id) pair."""
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM decisions WHERE account_id = $1 AND email_id = $2)",
+                account_id, email_id,
+            )
+
     async def log_decision(self, data: Dict) -> Optional[int]:
         """Log email processing decision. Returns id, or None if duplicate."""
         async with self._pool.acquire() as conn:
