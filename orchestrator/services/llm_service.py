@@ -242,8 +242,20 @@ class LLMService:
         sender_profile = context.get("sender_profile", {})
         learned_rules = context.get("learned_rules", [])
         domain_rules = context.get("domain_rules", [])
+        owner_name = context.get("owner_name", "")
+        owner_email = context.get("owner_email", "")
 
         sections = []
+
+        # Identidade do dono da conta (evita respostas a si mesmo)
+        if owner_name or owner_email:
+            sections.append(
+                f"DONO DA CONTA:\n"
+                f"Nome: {owner_name or 'N/A'}\n"
+                f"Email: {owner_email or 'N/A'}\n"
+                f"IMPORTANTE: Este email pertence a {owner_name or owner_email}. "
+                f"Ele e o DESTINATARIO que esta lendo os emails recebidos, NAO e um contato externo."
+            )
 
         if company:
             sections.append(
@@ -385,6 +397,8 @@ Responda em JSON:
         context = context or {}
         company = context.get("company_profile", {})
         sender_profile = context.get("sender_profile", {})
+        owner_name = context.get("owner_name", "")
+        owner_email = context.get("owner_email", "")
 
         company_section = ""
         if company:
@@ -407,8 +421,19 @@ Responda em JSON:
                 f"Projeto: {sender_profile.get('client_project', 'N/A')}\n"
             )
 
-        prompt = f"""Decida a acao apropriada para este email.
+        owner_section = ""
+        if owner_name or owner_email:
+            owner_section = (
+                f"\nDONO DA CONTA (voce esta escrevendo rascunhos EM NOME desta pessoa):\n"
+                f"Nome: {owner_name or 'N/A'}\n"
+                f"Email: {owner_email or 'N/A'}\n"
+                f"IMPORTANTE: O rascunho e uma resposta que {owner_name or owner_email} enviaria.\n"
+                f"NAO responda para {owner_name or owner_email} — ele e o AUTOR, nao o destinatario.\n"
+                f"O destinatario do rascunho e o REMETENTE do email (campo 'De').\n"
+            )
 
+        prompt = f"""Decida a acao apropriada para este email.
+{owner_section}
 EMAIL:
 De: {email.get("from", "")}
 Assunto: {email.get("subject", "")}
@@ -430,7 +455,7 @@ IMPORTANTE: SEMPRE gere o campo "rascunho_resposta", independente da acao escolh
 Excecao: NAO gere rascunho_resposta se a categoria for "spam" ou "newsletter".
 
 O rascunho deve ser em {company.get('idioma', 'portugues')}, tom {company.get('tom', 'profissional')}.
-{f'Use esta assinatura: {company.get("assinatura", "")}' if company.get('assinatura') else 'Termine com: Att, Diogenes Mendes'}
+{f'Use esta assinatura: {company.get("assinatura", "")}' if company.get('assinatura') else f'Termine com: Att, {owner_name or "Equipe"}'}
 
 Responda em JSON:
 {{

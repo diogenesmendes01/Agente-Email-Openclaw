@@ -133,12 +133,15 @@ class EmailProcessor:
             account_data = await self.db.get_account(account)
             account_id = account_data["id"] if account_data else None
             
+            owner_name = account_data.get("owner_name", "") if account_data else ""
             context = {
                 "vips": config.get("vips", []),
                 "urgency_words": config.get("urgency_words", []),
                 "ignore_words": config.get("ignore_words", []),
                 "projetos": config.get("projetos", []),
                 "thread_context": thread_context,  # Emails anteriores da thread
+                "owner_name": owner_name,
+                "owner_email": account,
             }
 
             # Fetch company profile and domain rules for LLM context

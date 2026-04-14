@@ -4,6 +4,7 @@
 CREATE TABLE IF NOT EXISTS accounts (
     id SERIAL PRIMARY KEY,
     email VARCHAR(255) UNIQUE NOT NULL,
+    owner_name VARCHAR(255),
     hook_token_env VARCHAR(100) NOT NULL,
     oauth_token_path VARCHAR(255),
     telegram_topic_id BIGINT,
