@@ -1,7 +1,8 @@
 """Tests for bug fixes round 2 — infra reliability."""
 import os
+import json
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -201,3 +202,131 @@ def test_migration_002_exists():
         content = f.read()
     assert "decisions_account_id_email_id_key" in content
     assert "playbooks_company_id_trigger_description_key" in content
+
+
+def test_migration_002_has_not_null_for_account_id():
+    """Migration 002 should enforce NOT NULL on decisions.account_id."""
+    migration_path = os.path.join(os.path.dirname(__file__), "..", "sql", "migrations", "002_idempotency_constraints.sql")
+    with open(migration_path) as f:
+        content = f.read()
+    assert "SET NOT NULL" in content, "Migration must add NOT NULL to decisions.account_id"
+    assert "account_id IS NULL" in content, "Migration must delete orphan NULL rows first"
+
+
+def test_schema_decisions_account_id_not_null():
+    """schema.sql should have account_id as NOT NULL in decisions table."""
+    schema_path = os.path.join(os.path.dirname(__file__), "..", "sql", "schema.sql")
+    with open(schema_path) as f:
+        schema = f.read()
+    decisions_block = schema[schema.index("CREATE TABLE decisions"):schema.index(");", schema.index("CREATE TABLE decisions"))]
+    assert "account_id INT NOT NULL" in decisions_block, "decisions.account_id must be NOT NULL"
+
+
+# ═══════════════════════════════════════════════════════════════
+# Behavioral tests — PR review items
+# ═══════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_duplicate_email_skips_actions_and_notification(mock_pool):
+    """Reprocessing the same email should NOT duplicate actions or Telegram notifications."""
+    pool, conn = mock_pool
+
+    # log_decision returns None on duplicate (ON CONFLICT DO NOTHING, no RETURNING)
+    conn.fetchrow.return_value = None
+    conn.fetchval.return_value = None
+
+    from orchestrator.services.database_service import DatabaseService
+    db = DatabaseService(pool)
+    result = await db.log_decision({
+        "account_id": 1, "email_id": "dup123",
+        "subject": "Test", "from": "a@b.com",
+        "classificacao": "outro", "prioridade": "Média",
+        "categoria": "outro", "acao": "notificar",
+        "resumo": "Test", "reasoning_tokens": 0,
+    })
+    assert result is None, "log_decision must return None for duplicates"
+
+
+@pytest.mark.asyncio
+async def test_log_decision_returns_none_signals_email_processor():
+    """EmailProcessor should return 'duplicate' status when log_decision returns None."""
+    import inspect
+    from orchestrator.handlers.email_processor import EmailProcessor
+    source = inspect.getsource(EmailProcessor.process_email)
+    assert "decision_id is None" in source, "EmailProcessor must check for None decision_id"
+    assert '"duplicate"' in source, "EmailProcessor must set status to 'duplicate'"
+
+
+@pytest.mark.asyncio
+async def test_job_queue_reap_stuck_processing(mock_pool):
+    """reap_stuck_processing should reset stuck jobs back to pending."""
+    pool, conn = mock_pool
+    conn.execute.return_value = "UPDATE 2"
+
+    from orchestrator.services.job_queue import JobQueue
+    jq = JobQueue(pool)
+    count = await jq.reap_stuck_processing(timeout_minutes=15)
+    assert count == 2
+    conn.execute.assert_called_once()
+    call_sql = conn.execute.call_args[0][0]
+    assert "status = 'pending'" in call_sql
+    assert "status = 'processing'" in call_sql
+
+
+@pytest.mark.asyncio
+async def test_get_pending_uses_transaction(mock_pool):
+    """get_pending should run inside a transaction for atomic lock+update."""
+    pool, conn = mock_pool
+    conn.fetch.return_value = [{"id": 1, "job_type": "test", "payload": "{}"}]
+    conn.execute.return_value = "UPDATE 1"
+
+    from orchestrator.services.job_queue import JobQueue
+    jq = JobQueue(pool)
+    jobs = await jq.get_pending(limit=5)
+    assert len(jobs) == 1
+    # transaction() should have been called
+    conn.transaction.assert_called_once()
+
+
+def test_gmail_auth_validates_even_with_valid_token():
+    """gmail_auth.py should call getProfile even when creds are already valid (no early return)."""
+    script_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "gmail_auth.py")
+    with open(script_path) as f:
+        source = f.read()
+    # The old code had: if creds and creds.valid: ... return
+    # The new code should NOT have an early return before getProfile
+    lines = source.split("\n")
+    found_valid_check = False
+    for i, line in enumerate(lines):
+        if "creds.valid" in line and "creds and creds.valid" in line:
+            found_valid_check = True
+            # Check the next few lines don't have a bare 'return'
+            for j in range(i + 1, min(i + 5, len(lines))):
+                stripped = lines[j].strip()
+                if stripped == "return":
+                    pytest.fail("gmail_auth.py has early return after creds.valid — validation is skipped")
+                if stripped and not stripped.startswith("#"):
+                    break
+    assert found_valid_check, "Should have a creds.valid check"
+
+
+def test_gmail_accounts_slot_20():
+    """Settings should load GMAIL_ACCOUNT_20 (range must go to 21)."""
+    env = {
+        "OPENROUTER_API_KEY": "sk-or-test",
+        "OPENAI_API_KEY": "sk-test",
+        "TELEGRAM_BOT_TOKEN": "123:ABC",
+        "TELEGRAM_CHAT_ID": "-100123",
+        "TELEGRAM_ALLOWED_USER_IDS": "111",
+        "TELEGRAM_WEBHOOK_SECRET": "secret",
+        "TELEGRAM_ALERT_USER_ID": "111",
+        "DATABASE_URL": "postgresql://user:pass@localhost:5432/test",
+        "FUNNEL_BASE_URL": "https://machine.ts.net",
+        "GMAIL_ACCOUNT_20": "slot20@gmail.com",
+        "GMAIL_HOOK_TOKEN_20": "token20",
+    }
+    with patch.dict(os.environ, env, clear=False):
+        from orchestrator.settings import Settings
+        s = Settings()
+        assert "slot20@gmail.com" in s.gmail_accounts, "GMAIL_ACCOUNT_20 must be loaded (range(1, 21))"

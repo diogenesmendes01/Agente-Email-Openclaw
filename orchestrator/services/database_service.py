@@ -167,8 +167,8 @@ class DatabaseService:
 
     # ── Decisions ──
 
-    async def log_decision(self, data: Dict) -> int:
-        """Log email processing decision. Idempotent: duplicate (account_id, email_id) is silently skipped."""
+    async def log_decision(self, data: Dict) -> Optional[int]:
+        """Log email processing decision. Returns id, or None if duplicate."""
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """INSERT INTO decisions
@@ -190,11 +190,8 @@ class DatabaseService:
             )
             if row:
                 return row["id"]
-            # Already exists — fetch existing id
-            return await conn.fetchval(
-                "SELECT id FROM decisions WHERE account_id = $1 AND email_id = $2",
-                data.get("account_id"), data.get("email_id"),
-            )
+            # Duplicate — return None so caller knows to skip side effects
+            return None
 
     # ── Tasks ──
 

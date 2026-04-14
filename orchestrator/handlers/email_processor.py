@@ -277,7 +277,14 @@ class EmailProcessor:
                 decision_data["account_id"] = account_id
             decision_id = await self.db.log_decision(decision_data)
             result["decision_id"] = decision_id
-            
+
+            # If decision_id is None, this email was already processed (ON CONFLICT).
+            # Skip side effects to prevent duplicate actions/notifications.
+            if decision_id is None:
+                logger.info(f"[{email_id}] Already processed (duplicate) — skipping actions & notification")
+                result["status"] = "duplicate"
+                return result
+
             # Armazenar no Qdrant
             if self.qdrant.is_connected() and result.get("embedding"):
                 await self.qdrant.store_email(
@@ -285,11 +292,11 @@ class EmailProcessor:
                     embedding=result["embedding"],
                     metadata=decision_data
                 )
-            
+
             # 8. Executar ação
             logger.info(f"[{email_id}] Executando ação: {action.get('acao')}")
             await self._execute_action(action, email, account)
-            
+
             # 9. Notificar Telegram
             # Calcular total de reasoning tokens
             total_reasoning_tokens = (

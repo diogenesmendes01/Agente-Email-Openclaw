@@ -1,6 +1,21 @@
--- Migration 002: Idempotency constraints and playbook uniqueness
+-- Migration 002: Idempotency constraints, NOT NULL, and playbook uniqueness
 -- Run: psql $DATABASE_URL -f sql/migrations/002_idempotency_constraints.sql
 -- Safe to re-run: uses DO $$ blocks with IF NOT EXISTS checks.
+
+-- ── decisions.account_id: must be NOT NULL for UNIQUE to work properly ──
+-- First delete orphan rows with NULL account_id
+DELETE FROM decisions WHERE account_id IS NULL;
+
+-- Then enforce NOT NULL (idempotent check)
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'decisions' AND column_name = 'account_id' AND is_nullable = 'YES'
+    ) THEN
+        ALTER TABLE decisions ALTER COLUMN account_id SET NOT NULL;
+    END IF;
+END $$;
 
 -- ── decisions: prevent duplicate processing of the same email ──
 DO $$

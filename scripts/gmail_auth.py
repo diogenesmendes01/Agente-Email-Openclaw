@@ -57,13 +57,13 @@ def authenticate(account: str):
     if token_file.exists():
         creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
 
+    need_save = False
     if creds and creds.valid:
-        print(f"Token valido para {account}")
-        return
-
-    if creds and creds.expired and creds.refresh_token:
+        pass  # Token loaded, will validate below
+    elif creds and creds.expired and creds.refresh_token:
         print(f"Renovando token para {account}...")
         creds.refresh(Request())
+        need_save = True
     else:
         print(f"Iniciando autorizacao OAuth para {account}...")
         print("O navegador vai abrir para voce autorizar o acesso.")
@@ -72,27 +72,29 @@ def authenticate(account: str):
 
         flow = InstalledAppFlow.from_client_secrets_file(str(client_secret), SCOPES)
         creds = flow.run_local_server(port=0)
+        need_save = True
 
-    # Validate that the authenticated account matches --account
-    try:
-        from googleapiclient.discovery import build
-        service = build("gmail", "v1", credentials=creds)
-        profile = service.users().getProfile(userId="me").execute()
-        authenticated_email = profile.get("emailAddress", "").lower()
-        if authenticated_email != account.lower():
-            print(f"\nERRO: Voce autenticou com '{authenticated_email}' mas --account e '{account}'")
-            print("O token NAO foi salvo. Tente novamente com a conta correta.")
-            sys.exit(1)
-    except Exception as e:
-        print(f"\nAVISO: Nao foi possivel verificar a conta autenticada: {e}")
-        print("Verifique manualmente se o login foi feito com a conta correta.")
+    # Always validate that the authenticated email matches --account
+    # This runs even for already-valid tokens to catch prior mismatches
+    from googleapiclient.discovery import build
+    service = build("gmail", "v1", credentials=creds)
+    profile = service.users().getProfile(userId="me").execute()
+    authenticated_email = profile.get("emailAddress", "").lower()
+    if authenticated_email != account.lower():
+        print(f"\nERRO: Voce autenticou com '{authenticated_email}' mas --account e '{account}'")
+        print("Token NAO foi salvo. Execute novamente com a conta correta.")
+        # Remove bad token if it was just created
+        if need_save and token_file.exists():
+            token_file.unlink()
+        sys.exit(1)
 
-    # Salvar token
-    with open(token_file, "w") as f:
-        f.write(creds.to_json())
+    # Save token only after validation passes
+    if need_save:
+        with open(token_file, "w") as f:
+            f.write(creds.to_json())
+        print(f"Token salvo em: {token_file}")
 
-    print(f"Token salvo em: {token_file}")
-    print(f"Conta {account} autenticada com sucesso!")
+    print(f"Conta {account} autenticada com sucesso! (verificado: {authenticated_email})")
 
 
 def main():

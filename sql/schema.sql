@@ -43,7 +43,7 @@ CREATE TABLE feedback (
 
 CREATE TABLE decisions (
     id SERIAL PRIMARY KEY,
-    account_id INT REFERENCES accounts(id) ON DELETE CASCADE,
+    account_id INT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     email_id VARCHAR(100) NOT NULL,
     subject TEXT,
     sender VARCHAR(255),
