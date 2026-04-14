@@ -483,6 +483,106 @@ Responda em JSON:
 
         return {"acao": "notificar", "justificativa": "Falha ao processar"}
     
+    async def generate_custom_reply(self, email_content: str, instruction: str) -> str:
+        """Generate a custom email reply using LLM."""
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {self.openrouter_key}"},
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": "Escreva respostas de email profissionais em português. Seja direto e formal."},
+                            {"role": "user", "content": f"Email recebido:\n{email_content[:2000]}\n\nInstrução: {instruction}\n\nEscreva a resposta:"},
+                        ],
+                        "max_tokens": 800,
+                    },
+                )
+                data = response.json()
+                return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.error(f"Custom reply generation error: {e}")
+            return None
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=2, max=30),
+        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
+        reraise=True
+    )
+    async def match_playbook(self, email_body: str, email_subject: str, playbooks: list) -> Optional[dict]:
+        """Ask LLM which playbook matches the email."""
+        playbook_list = "\n".join(
+            f"- ID {p['id']}: {p['trigger_description']}"
+            for p in playbooks
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {self.openrouter_key}"},
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": (
+                                "Você analisa emails e decide qual playbook se aplica. "
+                                "Responda APENAS em JSON: {\"matched_id\": <id ou null>, \"confidence\": <0.0-1.0>}. "
+                                "Se nenhum playbook se aplica, retorne matched_id: null."
+                            )},
+                            {"role": "user", "content": (
+                                f"Assunto: {email_subject}\n\nCorpo:\n{email_body[:2000]}\n\n"
+                                f"Playbooks disponíveis:\n{playbook_list}"
+                            )},
+                        ],
+                        "max_tokens": 100,
+                    },
+                )
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                return json.loads(content)
+        except Exception as e:
+            logger.error(f"Playbook matching error: {e}")
+            return None
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=2, max=30),
+        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
+        reraise=True
+    )
+    async def generate_playbook_response(self, template: str, company_name: str, tone: str, signature: str, contact_name: str, email_body: str) -> Optional[str]:
+        """Generate a response based on a playbook template with company tone."""
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {self.openrouter_key}"},
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": (
+                                f"Você escreve respostas de email para {company_name}. "
+                                f"Tom: {tone}. "
+                                f"Assinatura: {signature}\n"
+                                f"Use o template como base mas adapte ao contexto do email."
+                            )},
+                            {"role": "user", "content": (
+                                f"Template: {template}\n\n"
+                                f"Nome do contato: {contact_name}\n\n"
+                                f"Email recebido:\n{email_body[:2000]}\n\n"
+                                f"Escreva a resposta:"
+                            )},
+                        ],
+                        "max_tokens": 800,
+                    },
+                )
+                data = response.json()
+                return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.error(f"Playbook response generation error: {e}")
+            return None
+
     def _default_classification(self) -> Dict[str, Any]:
         """Classificação padrão"""
         return {

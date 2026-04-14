@@ -97,3 +97,78 @@ class TestDatabaseService:
         config = await db.get_account_config("t@g.com")
         assert "vips" in config
         assert config["telegram_topic"] == 5
+
+
+@pytest.mark.asyncio
+async def test_create_pending_action(mock_pool):
+    pool, conn = mock_pool
+    conn.fetchrow.return_value = {"id": 1}
+    from orchestrator.services.database_service import DatabaseService
+    db = DatabaseService(pool)
+    result = await db.create_pending_action(1, "email123", "archive", 99, 100, 200, {"key": "val"})
+    assert result == 1
+    conn.fetchrow.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_get_pending_action(mock_pool):
+    pool, conn = mock_pool
+    conn.fetchrow.return_value = {"id": 1, "email_id": "e1", "action_type": "archive", "state": "{}"}
+    from orchestrator.services.database_service import DatabaseService
+    db = DatabaseService(pool)
+    result = await db.get_pending_action("e1", "archive")
+    assert result["email_id"] == "e1"
+
+@pytest.mark.asyncio
+async def test_delete_pending_action(mock_pool):
+    pool, conn = mock_pool
+    from orchestrator.services.database_service import DatabaseService
+    db = DatabaseService(pool)
+    await db.delete_pending_action(1)
+    conn.execute.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_cleanup_expired_actions(mock_pool):
+    pool, conn = mock_pool
+    conn.execute.return_value = "DELETE 3"
+    from orchestrator.services.database_service import DatabaseService
+    db = DatabaseService(pool)
+    count = await db.cleanup_expired_actions()
+    assert count == 3
+
+@pytest.mark.asyncio
+async def test_upsert_company_profile(mock_pool):
+    pool, conn = mock_pool
+    conn.fetchrow.return_value = {"id": 1}
+    from orchestrator.services.database_service import DatabaseService
+    db = DatabaseService(pool)
+    result = await db.upsert_company_profile(1, "CodeWave", "12.345.678/0001-90", "formal")
+    assert result == 1
+
+@pytest.mark.asyncio
+async def test_get_company_profile(mock_pool):
+    pool, conn = mock_pool
+    conn.fetchrow.return_value = {"id": 1, "company_name": "CodeWave", "account_id": 1}
+    from orchestrator.services.database_service import DatabaseService
+    db = DatabaseService(pool)
+    result = await db.get_company_profile(1)
+    assert result["company_name"] == "CodeWave"
+
+@pytest.mark.asyncio
+async def test_get_playbooks(mock_pool):
+    pool, conn = mock_pool
+    conn.fetch.return_value = [
+        {"id": 1, "trigger_description": "boleto", "response_template": "Segue boleto..."},
+    ]
+    from orchestrator.services.database_service import DatabaseService
+    db = DatabaseService(pool)
+    result = await db.get_playbooks(1)
+    assert len(result) == 1
+
+@pytest.mark.asyncio
+async def test_create_playbook(mock_pool):
+    pool, conn = mock_pool
+    conn.fetchrow.return_value = {"id": 1}
+    from orchestrator.services.database_service import DatabaseService
+    db = DatabaseService(pool)
+    result = await db.create_playbook(1, "dúvida boleto", "Prezado, segue...")
+    assert result == 1
