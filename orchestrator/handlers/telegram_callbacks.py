@@ -264,24 +264,25 @@ async def handle_callback(callback_query: dict, services: dict):
     if action == "create_task":
         await tg.answer_callback(callback_id, "📝 Descreva a tarefa")
         account_data = await db.get_account(account)
+        keyboard = {"inline_keyboard": [[
+            {"text": "❌ Cancelar", "callback_data": f"cancel_create_task:{email_id}"}
+        ]]}
+        prompt_msg_id = await tg.send_text(
+            chat_id,
+            "📝 <b>Descreva a tarefa:</b>\n\nExemplos:\n• Ligar para o cliente\n• Revisar documentação\n\nDeixe em branco para usar o assunto.",
+            reply_markup=keyboard,
+            thread_id=topic_id,
+        )
         state = {
             "original_text": text,
             "account": account,
             "sender": _extract_sender(text),
             "subject": _extract_subject(text),
             "urgency": _extract_urgency(text),
+            "prompt_msg_id": prompt_msg_id,
         }
         acct_id = account_data["id"] if account_data else None
         await db.create_pending_action(acct_id, email_id, "create_task", actor_id, chat_id, message_id, state, topic_id=topic_id)
-        keyboard = {"inline_keyboard": [[
-            {"text": "❌ Cancelar", "callback_data": f"cancel_create_task:{email_id}"}
-        ]]}
-        await tg.send_text(
-            chat_id,
-            "📝 <b>Descreva a tarefa:</b>\n\nExemplos:\n• Ligar para o cliente\n• Revisar documentação\n\nDeixe em branco para usar o assunto.",
-            reply_markup=keyboard,
-            thread_id=topic_id,
-        )
         return
 
     # --- CANCEL CREATE TASK ---
@@ -374,6 +375,8 @@ async def handle_text_message(message: dict, services: dict):
     pending = await db.get_pending_by_chat(chat_id, "create_task", actor_id=actor_id, topic_id=topic_id)
     if pending:
         state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
+        user_msg_id = message.get("message_id")
+        prompt_msg_id = state.get("prompt_msg_id")
         ctx = {
             "email_id": pending["email_id"],
             "account": state.get("account", ""),
@@ -388,7 +391,17 @@ async def handle_text_message(message: dict, services: dict):
             "llm": llm,
         }
         status = await task.execute(ctx)
-        await tg.send_text(chat_id, status, thread_id=topic_id)
+
+        # Edit the prompt message with the result instead of sending a new message
+        if prompt_msg_id:
+            await tg.edit_message(prompt_msg_id, status, chat_id=chat_id)
+        else:
+            await tg.send_text(chat_id, status, thread_id=topic_id)
+
+        # Delete the user's message to keep the chat clean
+        if user_msg_id:
+            await tg.delete_message(chat_id, user_msg_id)
+
         await db.delete_pending_action(pending["id"])
         return
 
