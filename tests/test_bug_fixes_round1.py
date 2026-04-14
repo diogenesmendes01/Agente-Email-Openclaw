@@ -83,8 +83,8 @@ def test_webhook_error_handling_code_review():
 
     We verify the source code because the full app import requires DB/services.
     The endpoint should:
-    - Catch (json.JSONDecodeError, KeyError, ValueError) → 200 (no retry)
-    - Catch generic Exception → 500 (Telegram retries)
+    - Catch (json.JSONDecodeError, ValueError) on parse phase only → 200 (no retry)
+    - Catch generic Exception on processing phase → 500 (Telegram retries)
     """
     import inspect
     # We can't easily import the full app, so verify the source code pattern
@@ -92,9 +92,11 @@ def test_webhook_error_handling_code_review():
     with open(main_path) as f:
         source = f.read()
 
-    # Should have the parse-error handler returning 200
-    assert "json.JSONDecodeError, KeyError, ValueError" in source, \
-        "Missing parse-error catch for JSONDecodeError/KeyError/ValueError"
+    # Should have the parse-error handler returning 200 (only for JSON parse, not KeyError)
+    assert "json.JSONDecodeError, ValueError" in source, \
+        "Missing parse-error catch for JSONDecodeError/ValueError"
+    assert "KeyError" not in source.split("await request.json()")[1].split("bad_request")[0], \
+        "KeyError should NOT be caught in the parse phase — it indicates a server bug"
     assert 'status_code=200, content={"status": "bad_request"}' in source, \
         "Parse errors should return 200 with bad_request"
 

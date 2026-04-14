@@ -351,6 +351,12 @@ async def telegram_callback(request: Request):
 
     try:
         body = await request.json()
+    except (json.JSONDecodeError, ValueError) as e:
+        # Malformed payload — retry won't help, acknowledge to avoid infinite loop
+        logger.warning(f"Telegram callback parse error: {e}")
+        return JSONResponse(status_code=200, content={"status": "bad_request"})
+
+    try:
         logger.info(f"Telegram update: {json.dumps(body)[:500]}")
 
         _settings = get_settings()
@@ -369,10 +375,6 @@ async def telegram_callback(request: Request):
 
         return JSONResponse(status_code=200, content={"status": "ignored"})
 
-    except (json.JSONDecodeError, KeyError, ValueError) as e:
-        # Malformed payload — retry won't help, acknowledge to avoid infinite loop
-        logger.warning(f"Telegram callback parse error: {e}")
-        return JSONResponse(status_code=200, content={"status": "bad_request"})
     except Exception as e:
         # Transient error (DB, Gmail, LLM) — return 500 so Telegram retries
         logger.error(f"Telegram callback error: {e}", exc_info=True)
