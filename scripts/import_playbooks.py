@@ -51,11 +51,17 @@ async def main(yaml_path: str, account_id: int):
         )
         print(f"Company profile #{company_id} upserted")
 
-        # Import playbooks
+        # Import playbooks (idempotent — updates on re-import)
         for i, pb in enumerate(data.get("playbooks", [])):
             pb_id = await conn.fetchval(
                 """INSERT INTO playbooks (company_id, trigger_description, response_template, auto_respond, priority)
-                   VALUES ($1, $2, $3, $4, $5) RETURNING id""",
+                   VALUES ($1, $2, $3, $4, $5)
+                   ON CONFLICT (company_id, trigger_description) DO UPDATE SET
+                       response_template = EXCLUDED.response_template,
+                       auto_respond = EXCLUDED.auto_respond,
+                       priority = EXCLUDED.priority,
+                       updated_at = NOW()
+                   RETURNING id""",
                 company_id,
                 pb["gatilho"],
                 pb["template"],

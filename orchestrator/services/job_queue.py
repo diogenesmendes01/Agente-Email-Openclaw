@@ -35,16 +35,32 @@ class JobQueue:
             )
 
     async def get_pending(self, limit: int = 10) -> List[Dict]:
-        """Get pending jobs that are ready for retry."""
+        """Get pending jobs that are ready for retry.
+
+        Uses FOR UPDATE SKIP LOCKED so multiple workers never pick
+        the same job, and atomically sets status to 'processing'.
+        """
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """SELECT * FROM failed_jobs
-                   WHERE status = 'pending' AND next_retry_at <= NOW()
-                   ORDER BY next_retry_at ASC
-                   LIMIT $1""",
-                limit,
-            )
-            return [dict(r) for r in rows]
+            async with conn.transaction():
+                rows = await conn.fetch(
+                    """SELECT * FROM failed_jobs
+                       WHERE status = 'pending' AND next_retry_at <= NOW()
+                       ORDER BY next_retry_at ASC
+                       LIMIT $1
+                       FOR UPDATE SKIP LOCKED""",
+                    limit,
+                )
+                if rows:
+                    ids = [r["id"] for r in rows]
+                    # Set next_retry_at = NOW() so the reaper measures stuck time
+                    # from when the job was claimed, not from when it was enqueued.
+                    await conn.execute(
+                        """UPDATE failed_jobs
+                           SET status = 'processing', next_retry_at = NOW()
+                           WHERE id = ANY($1::int[])""",
+                        ids,
+                    )
+                return [dict(r) for r in rows]
 
     async def mark_completed(self, job_id: int):
         """Mark a job as successfully completed."""
@@ -55,12 +71,14 @@ class JobQueue:
             )
 
     async def mark_failed(self, job_id: int, error: str) -> bool:
-        """Record a failure. Returns True if job is now dead (max attempts reached)."""
+        """Record a failure and return to 'pending' for next retry.
+        Returns True if job is now dead (max attempts reached)."""
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """UPDATE failed_jobs
                    SET attempts = attempts + 1,
                        last_error = $2,
+                       status = 'pending',
                        next_retry_at = NOW() + (POWER(2, attempts + 1) || ' minutes')::INTERVAL
                    WHERE id = $1""",
                 job_id, error,
@@ -90,3 +108,24 @@ class JobQueue:
             return await conn.fetchval(
                 "SELECT COUNT(*) FROM failed_jobs WHERE status = 'pending'"
             ) or 0
+
+    async def reap_stuck_processing(self, timeout_minutes: int = 15) -> int:
+        """Reset jobs stuck in 'processing' for longer than timeout back to 'pending'.
+
+        This handles the case where a worker crashes after claiming a job
+        but before calling mark_completed/mark_failed.
+        Returns the number of jobs reaped.
+        """
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """UPDATE failed_jobs
+                   SET status = 'pending',
+                       next_retry_at = NOW()
+                   WHERE status = 'processing'
+                     AND next_retry_at < NOW() - ($1 || ' minutes')::INTERVAL""",
+                str(timeout_minutes),
+            )
+            count = int(result.split()[-1])
+            if count > 0:
+                logger.warning(f"Reaped {count} stuck processing jobs (timeout={timeout_minutes}m)")
+            return count

@@ -14,6 +14,9 @@ def processor():
     telegram = AsyncMock()
     playbook_svc = AsyncMock()
 
+    # claim_email returns an id to indicate we won the claim (not a duplicate)
+    db.claim_email.return_value = 1
+
     proc = EmailProcessor(db, qdrant, llm, gmail, telegram, playbook_service=playbook_svc)
     return proc
 
@@ -43,7 +46,7 @@ async def test_playbook_match_auto_respond(processor):
     processor.playbook_service.generate_response.return_value = "Prezado Client, segue segunda via do boleto."
 
     processor.telegram.send_email_notification.return_value = 100
-    processor.db.log_decision.return_value = 1
+    processor.db.update_decision.return_value = None
 
     result = await processor.process_email("em1", "u@t.com")
     assert result["status"] == "success"
@@ -68,7 +71,7 @@ async def test_playbook_no_match_normal_flow(processor):
     processor.llm.decide_action.return_value = {"acao": "notificar", "account": "u@t.com"}
     processor.playbook_service.match.return_value = None
     processor.telegram.send_email_notification.return_value = 100
-    processor.db.log_decision.return_value = 1
+    processor.db.update_decision.return_value = None
 
     result = await processor.process_email("em2", "u@t.com")
     assert result["status"] == "success"

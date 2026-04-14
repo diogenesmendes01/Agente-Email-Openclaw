@@ -167,17 +167,34 @@ class DatabaseService:
 
     # ── Decisions ──
 
-    async def log_decision(self, data: Dict) -> int:
-        """Log email processing decision."""
+    async def claim_email(self, account_id: int, email_id: str) -> Optional[int]:
+        """Atomically claim an email for processing.
+
+        Uses INSERT ... ON CONFLICT DO NOTHING on the UNIQUE(account_id, email_id)
+        constraint. Returns the new decision id if we won the claim, or None if
+        another worker already claimed it. This is the concurrency gate — only the
+        winner proceeds with side effects (playbook auto-response, actions, etc.).
+        """
         async with self._pool.acquire() as conn:
-            return await conn.fetchval(
-                """INSERT INTO decisions
-                   (account_id, email_id, subject, sender, classification,
-                    priority, category, action, summary, reasoning_tokens)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            row = await conn.fetchrow(
+                """INSERT INTO decisions (account_id, email_id)
+                   VALUES ($1, $2)
+                   ON CONFLICT (account_id, email_id) DO NOTHING
                    RETURNING id""",
-                data.get("account_id"),
-                data.get("email_id"),
+                account_id, email_id,
+            )
+            return row["id"] if row else None
+
+    async def update_decision(self, decision_id: int, data: Dict):
+        """Fill in classification/action data on a previously claimed decision row."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE decisions
+                   SET subject = $2, sender = $3, classification = $4,
+                       priority = $5, category = $6, action = $7,
+                       summary = $8, reasoning_tokens = $9
+                   WHERE id = $1""",
+                decision_id,
                 data.get("subject"),
                 data.get("from", data.get("sender", "")),
                 data.get("classificacao", data.get("classification", "")),
@@ -186,6 +203,17 @@ class DatabaseService:
                 data.get("acao", data.get("action", "")),
                 data.get("resumo", data.get("summary", "")),
                 data.get("reasoning_tokens", 0),
+            )
+
+    async def release_claim(self, decision_id: int):
+        """Delete a skeleton decision row so the email can be retried.
+
+        Called when processing fails after claim_email() succeeded — without
+        this, the UNIQUE constraint would block all future retry attempts.
+        """
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM decisions WHERE id = $1", decision_id
             )
 
     # ── Tasks ──
@@ -344,11 +372,17 @@ class DatabaseService:
             return [dict(r) for r in rows]
 
     async def create_playbook(self, company_id, trigger_description, response_template, auto_respond=True, priority=0):
-        """Create a new playbook."""
+        """Create a new playbook. Idempotent: updates if (company_id, trigger_description) already exists."""
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """INSERT INTO playbooks (company_id, trigger_description, response_template, auto_respond, priority)
-                   VALUES ($1, $2, $3, $4, $5) RETURNING id""",
+                   VALUES ($1, $2, $3, $4, $5)
+                   ON CONFLICT (company_id, trigger_description) DO UPDATE SET
+                       response_template = EXCLUDED.response_template,
+                       auto_respond = EXCLUDED.auto_respond,
+                       priority = EXCLUDED.priority,
+                       updated_at = NOW()
+                   RETURNING id""",
                 company_id, trigger_description, response_template, auto_respond, priority,
             )
             return row["id"]

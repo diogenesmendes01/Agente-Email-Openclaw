@@ -82,7 +82,14 @@ class EmailProcessor:
             "status": "processing",
             "timestamp": datetime.utcnow().isoformat()
         }
-        
+        # Tracks whether irreversible external side effects have fired
+        # (playbook send_reply, _execute_action). Once True, releasing the
+        # claim and retrying would duplicate those effects.
+        _side_effects_executed = False
+        # Parsed email data — captured here so the except block can use it
+        # for partial decision finalization without relying on locals().
+        _parsed_email = {}
+
         try:
             # 1. Fetch email
             logger.info(f"[{email_id}] Buscando email...")
@@ -100,6 +107,7 @@ class EmailProcessor:
             else:
                 email = raw_email  # Já parseado pelo GOGService
             email["body_clean"] = self.cleaner.clean(email.get("body", ""))
+            _parsed_email = email
 
             # Extract PDF attachment text
             if self.pdf_reader:
@@ -132,7 +140,19 @@ class EmailProcessor:
             # Fetch account_id early (needed for playbook check and later DB ops)
             account_data = await self.db.get_account(account)
             account_id = account_data["id"] if account_data else None
-            
+
+            # Atomic claim: INSERT a skeleton row into decisions.
+            # The UNIQUE(account_id, email_id) constraint means only one worker
+            # wins. Losers get None and bail out — no playbook, no actions, nothing.
+            decision_id = None
+            if account_id:
+                decision_id = await self.db.claim_email(account_id, email_id)
+                if decision_id is None:
+                    logger.info(f"[{email_id}] Already claimed by another worker — skipping entire pipeline")
+                    result["status"] = "duplicate"
+                    return result
+            result["decision_id"] = decision_id
+
             context = {
                 "vips": config.get("vips", []),
                 "urgency_words": config.get("urgency_words", []),
@@ -208,6 +228,18 @@ class EmailProcessor:
             # Se classificado como não importante com alta confiança, pular processamento
             if not classification.get("importante") and classification.get("confianca", 0) >= 0.8:
                 logger.info(f"[{email_id}] Email não importante, pulando...")
+                # Fill in the claimed decision row so it's not a ghost skeleton
+                if decision_id:
+                    await self.db.update_decision(decision_id, {
+                        "subject": email.get("subject", ""),
+                        "from": email.get("from", ""),
+                        "classificacao": classification.get("categoria", "outro"),
+                        "prioridade": classification.get("prioridade", "Baixa"),
+                        "categoria": classification.get("categoria", "outro"),
+                        "acao": "ignorar",
+                        "resumo": "Email não importante — processamento pulado",
+                        "reasoning_tokens": classification.get("reasoning_tokens", 0),
+                    })
                 result["status"] = "skipped"
                 result["reason"] = "Email não importante"
                 return result
@@ -242,6 +274,7 @@ class EmailProcessor:
                                 )
                                 if sent is not False:
                                     auto_responded = True
+                                    _side_effects_executed = True
                                     logger.info(f"[{email_id}] Auto-responded via playbook #{playbook_match['playbook_id']}")
                                 else:
                                     logger.warning(f"[{email_id}] send_reply returned False — not marking as auto-responded")
@@ -258,10 +291,8 @@ class EmailProcessor:
             action = await self.llm.decide_action(email, classification, summary, config, context)
             result["action"] = action
             
-            # 7. Persistir decisão
+            # 7. Persistir decisão (update the skeleton row claimed earlier)
             decision_data = {
-                "email_id": email_id,
-                "account": account,
                 "subject": email.get("subject", ""),
                 "from": email.get("from", ""),
                 "classificacao": classification.get("categoria", "outro"),
@@ -269,15 +300,15 @@ class EmailProcessor:
                 "categoria": classification.get("categoria", "outro"),
                 "acao": action.get("acao", "notificar"),
                 "resumo": summary.get("resumo", ""),
-                "timestamp": result["timestamp"]
+                "reasoning_tokens": (
+                    classification.get("reasoning_tokens", 0) +
+                    summary.get("reasoning_tokens", 0) +
+                    action.get("reasoning_tokens", 0)
+                ),
             }
-            
-            # account_data and account_id already fetched above
-            if account_id:
-                decision_data["account_id"] = account_id
-            decision_id = await self.db.log_decision(decision_data)
-            result["decision_id"] = decision_id
-            
+            if decision_id:
+                await self.db.update_decision(decision_id, decision_data)
+
             # Armazenar no Qdrant
             if self.qdrant.is_connected() and result.get("embedding"):
                 await self.qdrant.store_email(
@@ -285,11 +316,19 @@ class EmailProcessor:
                     embedding=result["embedding"],
                     metadata=decision_data
                 )
-            
+
             # 8. Executar ação
             logger.info(f"[{email_id}] Executando ação: {action.get('acao')}")
+            # Mark side effects BEFORE the call for irreversible actions.
+            # If _execute_action raises mid-way (e.g. archive API succeeds
+            # but a subsequent line throws), the flag is already set, so the
+            # except block will NOT release the claim and risk duplication.
+            # "notificar" is excluded — it's a no-op in _execute_action and
+            # the Telegram notification is idempotent.
+            if action.get("acao") in ("arquivar", "criar_task", "rascunho"):
+                _side_effects_executed = True
             await self._execute_action(action, email, account)
-            
+
             # 9. Notificar Telegram
             # Calcular total de reasoning tokens
             total_reasoning_tokens = (
@@ -352,18 +391,49 @@ class EmailProcessor:
             result["status"] = "error"
             result["error"] = str(e)
 
-            # Enqueue for retry (only on first failure, not during retry worker reprocessing)
-            if self.job_queue and not _is_retry:
+            decision_id = result.get("decision_id")
+
+            if _side_effects_executed and decision_id:
+                # Side effects already fired (send_reply, archive, create_task, etc.).
+                # Releasing the claim and retrying would DUPLICATE those effects.
+                # Keep the claim and finalize the decision row with whatever data we have.
                 try:
-                    acct = await self.db.get_account(account) if account else None
-                    acct_id = acct["id"] if acct else None
-                    await self.job_queue.enqueue(
-                        job_type="process_email",
-                        payload={"email_id": email_id, "account": account},
-                        account_id=acct_id,
-                    )
-                except Exception as enq_err:
-                    logger.error(f"[{email_id}] Failed to enqueue retry: {enq_err}")
+                    cls = result.get("classification", {})
+                    act = result.get("action", {})
+                    smr = result.get("summary", {})
+                    await self.db.update_decision(decision_id, {
+                        "subject": _parsed_email.get("subject", ""),
+                        "from": _parsed_email.get("from", ""),
+                        "classificacao": cls.get("categoria", ""),
+                        "prioridade": cls.get("prioridade", ""),
+                        "categoria": cls.get("categoria", ""),
+                        "acao": act.get("acao", "erro_parcial"),
+                        "resumo": smr.get("resumo", "") or f"Processamento parcial — erro: {str(e)[:200]}",
+                        "reasoning_tokens": cls.get("reasoning_tokens", 0),
+                    })
+                    logger.warning(f"[{email_id}] Side effects already executed — keeping claim, NOT retrying")
+                except Exception as upd_err:
+                    logger.error(f"[{email_id}] Failed to finalize partial decision: {upd_err}")
+            elif decision_id:
+                # No side effects yet — safe to release claim and retry.
+                try:
+                    await self.db.release_claim(decision_id)
+                    logger.info(f"[{email_id}] Released claim (decision #{decision_id}) for retry")
+                except Exception as rel_err:
+                    logger.error(f"[{email_id}] Failed to release claim: {rel_err}")
+
+                # Enqueue for retry (only on first failure, not during retry worker reprocessing)
+                if self.job_queue and not _is_retry:
+                    try:
+                        acct = await self.db.get_account(account) if account else None
+                        acct_id = acct["id"] if acct else None
+                        await self.job_queue.enqueue(
+                            job_type="process_email",
+                            payload={"email_id": email_id, "account": account},
+                            account_id=acct_id,
+                        )
+                    except Exception as enq_err:
+                        logger.error(f"[{email_id}] Failed to enqueue retry: {enq_err}")
 
             return result
     

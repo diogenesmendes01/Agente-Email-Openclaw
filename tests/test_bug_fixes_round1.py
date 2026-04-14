@@ -61,12 +61,13 @@ async def test_pipeline_passes_account_to_notification():
         "body_clean": "", "attachments": [], "threadId": "t1", "date": "2026-04-14",
     }
     db.get_account.return_value = {"id": 1}
+    db.claim_email.return_value = 1
     db.get_account_config.return_value = {"vips": [], "telegram_topic": 11}
     llm.classify_email.return_value = {"prioridade": "Média", "importante": True, "confianca": 0.8, "categoria": "outro"}
     llm.summarize_email.return_value = {"resumo": "Test"}
     llm.decide_action.return_value = {"acao": "notificar"}
     telegram.send_email_notification.return_value = 100
-    db.log_decision.return_value = 1
+    db.update_decision.return_value = None
 
     await proc.process_email("em1", "myaccount@gmail.com")
     call_kwargs = telegram.send_email_notification.call_args
@@ -187,6 +188,7 @@ async def test_pipeline_fetches_company_profile_and_domain_rules():
         "body_clean": "", "attachments": [], "threadId": "t1", "date": "2026-04-14",
     }
     db.get_account.return_value = {"id": 1}
+    db.claim_email.return_value = 1
     db.get_account_config.return_value = {"vips": [], "telegram_topic": 11}
     db.get_company_profile.return_value = {
         "id": 5, "company_name": "CodeWave", "cnpj": "12345",
@@ -200,7 +202,7 @@ async def test_pipeline_fetches_company_profile_and_domain_rules():
     llm.summarize_email.return_value = {"resumo": "Test"}
     llm.decide_action.return_value = {"acao": "notificar"}
     telegram.send_email_notification.return_value = 100
-    db.log_decision.return_value = 1
+    db.update_decision.return_value = None
 
     await proc.process_email("em1", "u@t.com")
 
@@ -343,12 +345,13 @@ async def test_pipeline_auto_responded_marks_notification():
         "body_clean": "", "attachments": [], "threadId": "t1", "date": "2026-04-14",
     }
     db.get_account.return_value = {"id": 1}
+    db.claim_email.return_value = 1
     db.get_account_config.return_value = {"vips": [], "telegram_topic": 11}
     llm.classify_email.return_value = {"prioridade": "Média", "importante": True, "confianca": 0.8, "categoria": "financeiro"}
     llm.summarize_email.return_value = {"resumo": "Boleto request"}
     llm.decide_action.return_value = {"acao": "notificar"}
     telegram.send_email_notification.return_value = 100
-    db.log_decision.return_value = 1
+    db.update_decision.return_value = None
 
     playbook_svc.match.return_value = {
         "playbook_id": 1, "template": "...", "trigger": "boleto",
