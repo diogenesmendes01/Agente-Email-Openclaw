@@ -116,10 +116,10 @@ class GmailService:
             return self._parse_message(msg)
         except HttpError as e:
             logger.error(f"Erro ao buscar email {email_id}: {e}")
-            return None
+            raise
         except Exception as e:
             logger.error(f"Erro inesperado ao buscar email {email_id}: {e}")
-            return None
+            raise
 
     async def get_thread(self, thread_id: str, account: str) -> List[Dict[str, Any]]:
         """Busca todos os emails de uma thread"""
@@ -160,7 +160,7 @@ class GmailService:
             return True
         except HttpError as e:
             logger.error(f"Erro ao arquivar email {email_id}: {e}")
-            return False
+            raise
 
     async def mark_as_spam(self, email_id: str, account: str) -> bool:
         """Marca email como spam"""
@@ -259,7 +259,7 @@ class GmailService:
             return True
         except HttpError as e:
             logger.error(f"Erro ao enviar resposta: {e}")
-            return False
+            raise
 
     @_retry_external
     async def get_history(self, history_id: str, account: str) -> List[str]:
@@ -290,12 +290,12 @@ class GmailService:
         except HttpError as e:
             if e.resp.status == 404:
                 logger.warning(f"historyId {history_id} expirado")
-            else:
-                logger.error(f"Erro ao buscar history: {e}")
-            return []
+                return []  # expired history is not retryable
+            logger.error(f"Erro ao buscar history: {e}")
+            raise
         except Exception as e:
             logger.error(f"Erro inesperado ao buscar history: {e}")
-            return []
+            raise
 
     async def watch(self, account: str, topic: str, label_ids: List[str] = None) -> Optional[Dict]:
         """Ativa Gmail Watch (Pub/Sub push notifications). Expira em 7 dias."""
@@ -340,7 +340,7 @@ class GmailService:
             return True
         except HttpError as e:
             logger.error(f"Erro ao mover email {email_id} para {label}: {e}")
-            return False
+            raise
 
     @_retry_external
     async def get_attachment(self, email_id: str, attachment_id: str, account: str) -> Optional[bytes]:
@@ -358,7 +358,7 @@ class GmailService:
             return base64.urlsafe_b64decode(data) if data else None
         except Exception as e:
             logger.error(f"Error fetching attachment {attachment_id}: {e}")
-            return None
+            raise
 
     # ============================================================
     # PARSING

@@ -53,7 +53,7 @@ class EmailProcessor:
         self._emails_processed = 0
         self._counter_loaded = False
     
-    async def process_email(self, email_id: str, account: str) -> Dict[str, Any]:
+    async def process_email(self, email_id: str, account: str, _is_retry: bool = False) -> Dict[str, Any]:
         """
         Processa um email completo
         
@@ -315,8 +315,8 @@ class EmailProcessor:
             result["status"] = "error"
             result["error"] = str(e)
 
-            # Enqueue for retry
-            if self.job_queue:
+            # Enqueue for retry (only on first failure, not during retry worker reprocessing)
+            if self.job_queue and not _is_retry:
                 try:
                     acct = await self.db.get_account(account) if account else None
                     acct_id = acct["id"] if acct else None
