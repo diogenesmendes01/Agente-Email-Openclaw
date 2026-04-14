@@ -507,3 +507,112 @@ def test_gmail_accounts_slot_20():
         from orchestrator.settings import Settings
         s = Settings()
         assert "slot20@gmail.com" in s.gmail_accounts, "GMAIL_ACCOUNT_20 must be loaded (range(1, 21))"
+
+
+# ═══════════════════════════════════════════════════════════════
+# Round 5 — side_effects_executed timing + partial error data
+# ═══════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_notificar_telegram_failure_releases_claim():
+    """acao='notificar' + Telegram failure should release claim and allow retry.
+
+    'notificar' has no irreversible side effect inside _execute_action — the
+    Telegram notification is idempotent.  So _side_effects_executed must remain
+    False, letting the except block release the claim and enqueue a retry.
+    """
+    from orchestrator.handlers.email_processor import EmailProcessor
+    db = AsyncMock()
+    qdrant = MagicMock()
+    qdrant.is_connected.return_value = False
+    llm = AsyncMock()
+    gmail = AsyncMock()
+    telegram = AsyncMock()
+
+    proc = EmailProcessor(db, qdrant, llm, gmail, telegram)
+
+    gmail.get_email.return_value = {
+        "id": "em1", "from": "friend@co.com", "from_email": "friend@co.com",
+        "from_name": "Friend", "subject": "Meeting", "body": "Let's sync",
+        "body_clean": "", "attachments": [], "threadId": "t1", "date": "2026-04-14",
+    }
+    db.get_account.return_value = {"id": 1}
+    db.claim_email.return_value = 55
+
+    llm.classify_email.return_value = {
+        "prioridade": "Média", "importante": True, "confianca": 0.8,
+        "categoria": "trabalho", "reasoning_tokens": 10,
+    }
+    llm.summarize_email.return_value = {"resumo": "Sync meeting", "reasoning_tokens": 5}
+    llm.decide_action.return_value = {"acao": "notificar", "reasoning_tokens": 5}
+
+    # Telegram notification blows up AFTER _execute_action succeeds (notificar is a no-op there)
+    telegram.send_email_notification.side_effect = RuntimeError("Telegram API timeout")
+
+    result = await proc.process_email("em1", "friend@co.com")
+    assert result["status"] == "error"
+    # _side_effects_executed should be False for acao='notificar' → claim released
+    db.release_claim.assert_called_once_with(55)
+    # Decision should NOT be finalized (no partial update — clean retry instead)
+    # update_decision was called once in the happy path (step 7) before the error
+    # The except block should NOT call it again since _side_effects_executed is False
+    assert db.update_decision.call_count == 1, (
+        "update_decision should only be called once (step 7), not in the except block"
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_error_preserves_real_subject_and_sender():
+    """When side effects fired and a later error occurs, the partial decision
+    finalization must use the parsed email's subject/from — not empty strings
+    from result['classification'] which doesn't have those fields.
+    """
+    from orchestrator.handlers.email_processor import EmailProcessor
+    db = AsyncMock()
+    qdrant = MagicMock()
+    qdrant.is_connected.return_value = False
+    llm = AsyncMock()
+    gmail = AsyncMock()
+    telegram = AsyncMock()
+
+    proc = EmailProcessor(db, qdrant, llm, gmail, telegram)
+
+    gmail.get_email.return_value = {
+        "id": "em1", "from": "vip@corp.com", "from_email": "vip@corp.com",
+        "from_name": "VIP Client", "subject": "Contrato urgente", "body": "Precisamos assinar",
+        "body_clean": "", "attachments": [], "threadId": "t1", "date": "2026-04-14",
+    }
+    db.get_account.return_value = {"id": 1}
+    db.claim_email.return_value = 88
+
+    llm.classify_email.return_value = {
+        "prioridade": "Alta", "importante": True, "confianca": 0.9,
+        "categoria": "trabalho", "reasoning_tokens": 10,
+    }
+    llm.summarize_email.return_value = {"resumo": "Contrato para assinatura", "reasoning_tokens": 5}
+    llm.decide_action.return_value = {"acao": "arquivar", "reasoning_tokens": 5}
+
+    # _execute_action succeeds (archive is irreversible → _side_effects_executed = True)
+    gmail.archive_email.return_value = None
+
+    # Telegram notification blows up after the archive side effect
+    telegram.send_email_notification.side_effect = RuntimeError("Telegram down")
+
+    result = await proc.process_email("em1", "vip@corp.com")
+    assert result["status"] == "error"
+    # Claim must be kept (side effects already fired)
+    db.release_claim.assert_not_called()
+
+    # update_decision is called twice: once in step 7 (happy path), once in except block
+    assert db.update_decision.call_count == 2
+
+    # The SECOND call (except block) must have real subject/from from the parsed email
+    partial_call = db.update_decision.call_args_list[1]
+    data = partial_call[0][1]
+    assert data["subject"] == "Contrato urgente", (
+        f"Partial error finalization must preserve real subject, got: {data['subject']!r}"
+    )
+    assert data["from"] == "vip@corp.com", (
+        f"Partial error finalization must preserve real sender, got: {data['from']!r}"
+    )

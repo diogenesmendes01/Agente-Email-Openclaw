@@ -86,6 +86,9 @@ class EmailProcessor:
         # (playbook send_reply, _execute_action). Once True, releasing the
         # claim and retrying would duplicate those effects.
         _side_effects_executed = False
+        # Parsed email data — captured here so the except block can use it
+        # for partial decision finalization without relying on locals().
+        _parsed_email = {}
 
         try:
             # 1. Fetch email
@@ -104,6 +107,7 @@ class EmailProcessor:
             else:
                 email = raw_email  # Já parseado pelo GOGService
             email["body_clean"] = self.cleaner.clean(email.get("body", ""))
+            _parsed_email = email
 
             # Extract PDF attachment text
             if self.pdf_reader:
@@ -315,8 +319,12 @@ class EmailProcessor:
 
             # 8. Executar ação
             logger.info(f"[{email_id}] Executando ação: {action.get('acao')}")
-            _side_effects_executed = True
             await self._execute_action(action, email, account)
+            # Only mark side effects for actions that touch external systems.
+            # "notificar" does nothing in _execute_action — the Telegram
+            # notification below is idempotent (duplicate message is harmless).
+            if action.get("acao") in ("arquivar", "criar_task", "rascunho"):
+                _side_effects_executed = True
 
             # 9. Notificar Telegram
             # Calcular total de reasoning tokens
@@ -387,15 +395,18 @@ class EmailProcessor:
                 # Releasing the claim and retrying would DUPLICATE those effects.
                 # Keep the claim and finalize the decision row with whatever data we have.
                 try:
+                    cls = result.get("classification", {})
+                    act = result.get("action", {})
+                    smr = result.get("summary", {})
                     await self.db.update_decision(decision_id, {
-                        "subject": result.get("classification", {}).get("subject", ""),
-                        "from": "",
-                        "classificacao": result.get("classification", {}).get("categoria", ""),
-                        "prioridade": result.get("classification", {}).get("prioridade", ""),
-                        "categoria": result.get("classification", {}).get("categoria", ""),
-                        "acao": result.get("action", {}).get("acao", "erro_parcial"),
-                        "resumo": f"Processamento parcial — erro: {str(e)[:200]}",
-                        "reasoning_tokens": 0,
+                        "subject": _parsed_email.get("subject", ""),
+                        "from": _parsed_email.get("from", ""),
+                        "classificacao": cls.get("categoria", ""),
+                        "prioridade": cls.get("prioridade", ""),
+                        "categoria": cls.get("categoria", ""),
+                        "acao": act.get("acao", "erro_parcial"),
+                        "resumo": smr.get("resumo", "") or f"Processamento parcial — erro: {str(e)[:200]}",
+                        "reasoning_tokens": cls.get("reasoning_tokens", 0),
                     })
                     logger.warning(f"[{email_id}] Side effects already executed — keeping claim, NOT retrying")
                 except Exception as upd_err:
