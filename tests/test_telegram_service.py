@@ -71,6 +71,65 @@ async def test_set_webhook(tg_service):
         assert result is True
 
 
+def test_acao_usuario_fallback_to_justificativa(tg_service):
+    """When acao_usuario is missing/empty, AÇÃO NECESSÁRIA must show justificativa."""
+    email = {"from": "x@y.com", "subject": "Urgente", "date": "2026-04-17 10:00"}
+    classification = {"prioridade": "Alta", "importante": True, "categoria": "cliente", "confianca": 0.9}
+    summary = {"resumo": "resumo"}
+
+    # Case 1: acao_usuario missing, justificativa present
+    action = {"justificativa": "Cliente VIP pediu retorno urgente"}
+    msg = tg_service._format_message(email, classification, summary, action)
+    assert "AÇÃO NECESSÁRIA" in msg
+    assert "Cliente VIP pediu retorno urgente" in msg
+
+    # Case 2: acao_usuario empty string, justificativa present
+    action = {"acao_usuario": "", "justificativa": "Fallback ativado"}
+    msg = tg_service._format_message(email, classification, summary, action)
+    assert "Fallback ativado" in msg
+
+    # Case 3: both missing -> default
+    action = {}
+    msg = tg_service._format_message(email, classification, summary, action)
+    assert "Verificar e tomar ação necessária" in msg
+
+    # Case 4: acao_usuario present -> takes precedence
+    action = {"acao_usuario": "Responder antes de 18h", "justificativa": "não usado"}
+    msg = tg_service._format_message(email, classification, summary, action)
+    assert "Responder antes de 18h" in msg
+    assert "não usado" not in msg
+
+
+def test_rascunho_truncation_2000_chars(tg_service):
+    """Rascunho longer than 2000 chars must be truncated with continuation marker."""
+    email = {"from": "x@y.com", "subject": "Test", "date": "2026-04-17 10:00"}
+    classification = {"prioridade": "Media", "categoria": "outro", "confianca": 0.5}
+    summary = {"resumo": "r"}
+
+    # Short draft: no marker
+    short_draft = "Olá, obrigado pelo contato."
+    action = {"rascunho_resposta": short_draft}
+    msg = tg_service._format_message(email, classification, summary, action)
+    assert short_draft in msg
+    assert "rascunho continua" not in msg
+
+    # Long draft: truncated + marker
+    long_draft = "A" * 2500
+    action = {"rascunho_resposta": long_draft}
+    msg = tg_service._format_message(email, classification, summary, action)
+    # First 2000 A's should be present; the 2500th should not
+    assert "A" * 2000 in msg
+    assert "A" * 2001 not in msg
+    assert "…(rascunho continua — use Editar)" in msg
+
+    # Exactly 2000: no marker
+    exact_draft = "B" * 2000
+    action = {"rascunho_resposta": exact_draft}
+    msg = tg_service._format_message(email, classification, summary, action)
+    assert "B" * 2000 in msg
+    assert "rascunho continua" not in msg
+
+
 @pytest.mark.asyncio
 async def test_send_text(tg_service):
     mock_resp = MagicMock()

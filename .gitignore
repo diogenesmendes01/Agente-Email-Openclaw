@@ -19,3 +19,5 @@ pgdata/
 playbooks/*
 !playbooks/modelo.yaml.example
 history_ids.json
+.worktrees/
+.claude/

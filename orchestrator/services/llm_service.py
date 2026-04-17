@@ -497,11 +497,17 @@ Responda em JSON:
                 f"O destinatario do rascunho e o REMETENTE do email (campo 'De').\n"
             )
 
+        body_raw = (email.get("body_clean") or email.get("body", "") or "")
+        body_for_prompt = body_raw[:2000]
+        if len(body_raw) > 2000:
+            body_for_prompt += "\n[...corpo truncado...]"
+
         prompt = f"""Decida a acao apropriada para este email.
 {owner_section}
 EMAIL:
 De: {email.get("from", "")}
 Assunto: {email.get("subject", "")}
+Corpo: {body_for_prompt}
 
 CLASSIFICACAO: {json.dumps(classification, ensure_ascii=False)}
 
@@ -522,10 +528,15 @@ Excecao: NAO gere rascunho_resposta se a categoria for "spam" ou "newsletter".
 O rascunho deve ser em {company.get('idioma', 'portugues')}, tom {company.get('tom', 'profissional')}.
 {f'Use esta assinatura: {company.get("assinatura", "")}' if company.get('assinatura') else f'Termine com: Att, {owner_name or "Equipe"}'}
 
+CAMPO "acao_usuario": Instrucao imperativa e concreta para o dono da conta (1-2 frases). DEVE citar valores, datas, prazos e protocolos do email quando existirem.
+Exemplo bom: "Negocie o debito de R$ 826,92 no portal Serasa antes de 05/02/2026 para evitar negativacao."
+Exemplo ruim: "Verificar e tomar acao necessaria."
+
 Responda em JSON:
 {{
     "acao": "notificar/arquivar/criar_task/rascunho",
     "justificativa": "por que essa acao",
+    "acao_usuario": "instrucao imperativa curta citando valores/prazos",
     "task": {{
         "titulo": "titulo da tarefa se criar_task",
         "prioridade": "Alta/Media/Baixa",
