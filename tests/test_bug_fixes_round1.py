@@ -4,6 +4,13 @@ import os
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from orchestrator.services.llm_validator import ValidationMetadata
+
+
+def _meta(kind: str) -> ValidationMetadata:
+    """Build a neutral ValidationMetadata for use in mock return tuples."""
+    return ValidationMetadata(kind=kind)
+
 
 # ═══════════════════════════════════════════════════════════════
 # Fix #1 — callback_data account propagation
@@ -62,9 +69,9 @@ async def test_pipeline_passes_account_to_notification():
     }
     db.get_account.return_value = {"id": 1}
     db.get_account_config.return_value = {"vips": [], "telegram_topic": 11}
-    llm.classify_email.return_value = {"prioridade": "Média", "importante": True, "confianca": 0.8, "categoria": "outro"}
-    llm.summarize_email.return_value = {"resumo": "Test"}
-    llm.decide_action.return_value = {"acao": "notificar"}
+    llm.classify_email.return_value = ({"prioridade": "Média", "importante": True, "confianca": 0.8, "categoria": "outro"}, _meta("classification"))
+    llm.summarize_email.return_value = ({"resumo": "Test"}, _meta("summary"))
+    llm.decide_action.return_value = ({"acao": "notificar"}, _meta("action"))
     telegram.send_email_notification.return_value = 100
     db.log_decision.return_value = 1
 
@@ -196,9 +203,9 @@ async def test_pipeline_fetches_company_profile_and_domain_rules():
     db.get_domain_rules.return_value = [
         {"domain": "@important.com", "category": "cliente", "min_priority": "Alta", "default_action": "notificar"},
     ]
-    llm.classify_email.return_value = {"prioridade": "Média", "importante": True, "confianca": 0.8, "categoria": "outro"}
-    llm.summarize_email.return_value = {"resumo": "Test"}
-    llm.decide_action.return_value = {"acao": "notificar"}
+    llm.classify_email.return_value = ({"prioridade": "Média", "importante": True, "confianca": 0.8, "categoria": "outro"}, _meta("classification"))
+    llm.summarize_email.return_value = ({"resumo": "Test"}, _meta("summary"))
+    llm.decide_action.return_value = ({"acao": "notificar"}, _meta("action"))
     telegram.send_email_notification.return_value = 100
     db.log_decision.return_value = 1
 
@@ -344,9 +351,9 @@ async def test_pipeline_auto_responded_marks_notification():
     }
     db.get_account.return_value = {"id": 1}
     db.get_account_config.return_value = {"vips": [], "telegram_topic": 11}
-    llm.classify_email.return_value = {"prioridade": "Média", "importante": True, "confianca": 0.8, "categoria": "financeiro"}
-    llm.summarize_email.return_value = {"resumo": "Boleto request"}
-    llm.decide_action.return_value = {"acao": "notificar"}
+    llm.classify_email.return_value = ({"prioridade": "Média", "importante": True, "confianca": 0.8, "categoria": "financeiro"}, _meta("classification"))
+    llm.summarize_email.return_value = ({"resumo": "Boleto request"}, _meta("summary"))
+    llm.decide_action.return_value = ({"acao": "notificar"}, _meta("action"))
     telegram.send_email_notification.return_value = 100
     db.log_decision.return_value = 1
 
@@ -388,9 +395,9 @@ async def test_send_reply_false_keeps_auto_responded_false():
     }
     db.get_account.return_value = {"id": 1}
     db.get_account_config.return_value = {"vips": [], "telegram_topic": 11}
-    llm.classify_email.return_value = {"prioridade": "Média", "importante": True, "confianca": 0.8, "categoria": "financeiro"}
-    llm.summarize_email.return_value = {"resumo": "Boleto request"}
-    llm.decide_action.return_value = {"acao": "notificar"}
+    llm.classify_email.return_value = ({"prioridade": "Média", "importante": True, "confianca": 0.8, "categoria": "financeiro"}, _meta("classification"))
+    llm.summarize_email.return_value = ({"resumo": "Boleto request"}, _meta("summary"))
+    llm.decide_action.return_value = ({"acao": "notificar"}, _meta("action"))
     telegram.send_email_notification.return_value = 100
     db.log_decision.return_value = 1
 

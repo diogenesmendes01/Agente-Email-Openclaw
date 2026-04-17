@@ -412,22 +412,49 @@ class DatabaseService:
         json_parse_failed: bool = False,
         schema_valid: bool = True,
         fallback_used: bool = False,
+        # Back-compat: older callers pass prompt_tokens/completion_tokens and
+        # mean "tokens of the accepted attempt" (no retry accounting).
         prompt_tokens: Optional[int] = None,
         completion_tokens: Optional[int] = None,
+        # Granular fields (new):
+        prompt_tokens_successful: Optional[int] = None,
+        completion_tokens_successful: Optional[int] = None,
+        prompt_tokens_total: Optional[int] = None,
+        completion_tokens_total: Optional[int] = None,
+        cost_total_usd: Optional[float] = None,
     ) -> Optional[int]:
-        """Persist one LLM validation event. Swallows errors (telemetry path)."""
+        """Persist one LLM validation event. Swallows errors (telemetry path).
+
+        ``prompt_tokens`` / ``completion_tokens`` now mean the TOTAL across
+        all attempts (original + retries) so the numbers in ``llm_quality_log``
+        line up with billing. ``prompt_tokens_successful`` / ``completion_tokens_successful``
+        carry the accepted-attempt tokens separately for retry-efficiency analysis.
+        """
+        # Resolve legacy vs granular args. If the caller provided the granular
+        # fields, those win; otherwise fall back to the legacy pair.
+        final_prompt_total = (
+            prompt_tokens_total if prompt_tokens_total is not None else prompt_tokens
+        )
+        final_completion_total = (
+            completion_tokens_total if completion_tokens_total is not None else completion_tokens
+        )
         try:
             async with self._pool.acquire() as conn:
                 return await conn.fetchval(
                     """INSERT INTO llm_quality_log
                        (account_id, email_message_id, kind, model, retries, flags,
                         json_parse_failed, schema_valid, fallback_used,
-                        prompt_tokens, completion_tokens)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                        prompt_tokens, completion_tokens,
+                        prompt_tokens_successful, completion_tokens_successful,
+                        prompt_tokens_total, completion_tokens_total, cost_total_usd)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                               $12, $13, $14, $15, $16)
                        RETURNING id""",
                     account_id, email_id, kind, model, retries, list(flags or []),
                     json_parse_failed, schema_valid, fallback_used,
-                    prompt_tokens, completion_tokens,
+                    final_prompt_total, final_completion_total,
+                    prompt_tokens_successful, completion_tokens_successful,
+                    final_prompt_total, final_completion_total, cost_total_usd,
                 )
         except Exception as e:
             logger.warning(f"log_llm_quality failed: {e}")

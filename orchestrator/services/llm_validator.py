@@ -317,8 +317,24 @@ class ValidationMetadata:
     schema_valid: bool = True
     fallback_used: bool = False
     model: Optional[str] = None
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
+    # Tokens/cost from the attempt we accepted as final (successful OR last fallback).
+    prompt_tokens_successful: int = 0
+    completion_tokens_successful: int = 0
+    cost_successful_usd: float = 0.0
+    # Totals summed across ALL attempts (original + retries).
+    prompt_tokens_total: int = 0
+    completion_tokens_total: int = 0
+    cost_total_usd: float = 0.0
+
+    # --- Back-compat aliases: older callers read `prompt_tokens`/`completion_tokens`.
+    # We now expose them as the *totals* (what you'd bill / rate-limit against).
+    @property
+    def prompt_tokens(self) -> int:
+        return self.prompt_tokens_total
+
+    @property
+    def completion_tokens(self) -> int:
+        return self.completion_tokens_total
 
 
 # ---------------------------------------------------------------------------
@@ -395,8 +411,21 @@ async def validate_and_retry(
             break
         last_raw = raw
         meta.model = raw.get("model_used") or meta.model
-        meta.prompt_tokens = raw.get("prompt_tokens", meta.prompt_tokens) or 0
-        meta.completion_tokens = raw.get("completion_tokens", meta.completion_tokens) or 0
+
+        attempt_prompt_tokens = raw.get("prompt_tokens", 0) or 0
+        attempt_completion_tokens = raw.get("completion_tokens", 0) or 0
+        attempt_cost = raw.get("cost_usd", 0.0) or 0.0
+
+        # Accumulate across ALL attempts (for billing/rate-limit accuracy).
+        meta.prompt_tokens_total += attempt_prompt_tokens
+        meta.completion_tokens_total += attempt_completion_tokens
+        meta.cost_total_usd += attempt_cost
+
+        # "Successful" = the attempt we ultimately keep; updated each loop so
+        # it ends up pointing at the final accepted attempt.
+        meta.prompt_tokens_successful = attempt_prompt_tokens
+        meta.completion_tokens_successful = attempt_completion_tokens
+        meta.cost_successful_usd = attempt_cost
 
         parsed = _extract_json(raw.get("content", "") or "")
         retry_signals: List[str] = []

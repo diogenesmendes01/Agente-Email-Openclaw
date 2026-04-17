@@ -289,3 +289,150 @@ async def test_pipeline_llm_returns_none_fallback():
     result, meta = await validate_and_retry("action", "prompt", _call, email)
     assert meta.fallback_used is True
     assert result["acao"] == "notificar"
+
+
+# ---------------------------------------------------------------------------
+# Issue 2 — token accounting across retries
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pipeline_accumulates_tokens_across_retries():
+    """Two retries (3 LLM calls) -> total tokens = sum of ALL attempts, not last one only."""
+    email = {"subject": "cobranca", "body": "Debito de R$ 826,92 em aberto."}
+    bad_draft = json.dumps({
+        "acao": "rascunho", "justificativa": "responder",
+        "rascunho_resposta": "Ola, retorno em breve com detalhes adicionais para voce.",
+    })
+    good_draft = json.dumps({
+        "acao": "rascunho", "justificativa": "responder",
+        "rascunho_resposta": "Confirmo o debito de R$ 826,92 e regularizo hoje conforme combinado.",
+    })
+    responses = [
+        _raw(bad_draft, prompt_tokens=100, completion_tokens=100, cost_usd=0.001),
+        _raw(good_draft, prompt_tokens=150, completion_tokens=150, cost_usd=0.002),
+    ]
+    call = _make_call_fn(responses)
+    # max_retries=1 => up to 2 attempts. We expect both to run (bad then good).
+    result, meta = await validate_and_retry("action", "prompt", call, email, max_retries=1)
+
+    assert call.calls["i"] == 2
+    assert meta.retries == 1
+    # TOTAL = 100+150 across both attempts
+    assert meta.prompt_tokens_total == 250
+    assert meta.completion_tokens_total == 250
+    assert round(meta.cost_total_usd, 6) == 0.003
+    # SUCCESSFUL = tokens of the accepted (last/good) attempt only
+    assert meta.prompt_tokens_successful == 150
+    assert meta.completion_tokens_successful == 150
+    # Back-compat alias exposes totals
+    assert meta.prompt_tokens == 250
+    assert meta.completion_tokens == 250
+
+
+@pytest.mark.asyncio
+async def test_pipeline_accumulates_three_attempts():
+    """Three attempts with tokens {100, 150, 200} -> total 450."""
+    email = {"subject": "x", "body": "y"}
+    responses = [
+        _raw("not json", prompt_tokens=100, completion_tokens=10, cost_usd=0.001),
+        _raw("still broken", prompt_tokens=150, completion_tokens=20, cost_usd=0.002),
+        _raw(json.dumps({"resumo": "Aviso concreto da empresa X"}),
+             prompt_tokens=200, completion_tokens=30, cost_usd=0.003),
+    ]
+    call = _make_call_fn(responses)
+    _result, meta = await validate_and_retry(
+        "summary", "prompt", call, email, max_retries=2
+    )
+    assert call.calls["i"] == 3
+    assert meta.prompt_tokens_total == 450
+    assert meta.completion_tokens_total == 60
+    assert round(meta.cost_total_usd, 6) == 0.006
+
+
+# ---------------------------------------------------------------------------
+# Issue 1 — concurrent emails must not share validation state
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_parallel_emails_do_not_leak_validation(monkeypatch):
+    """
+    Regression guard for the race-condition fix.
+
+    Two concurrent calls to LLMService.classify_email (via asyncio.gather) must
+    each receive their own ValidationMetadata. Before the fix, both calls shared
+    `self.last_validation["classification"]` on the singleton, so whichever call
+    finished last overwrote the other's telemetry.
+    """
+    import asyncio
+    from orchestrator.services.llm_service import LLMService
+
+    llm = LLMService.__new__(LLMService)
+    llm.openrouter_key = "fake"
+    llm.openai_key = None
+    llm.default_model = "test/model"
+    llm.model = "test/model"
+    llm.embedding_model = "none"
+    llm.model_registry = None
+    llm.openai_client = None
+    llm._configured = True
+    llm.MAX_PROMPT_TOKENS = 999999
+
+    # Build two different raw responses, one per email. Each path awaits a
+    # distinct event so we can force them to interleave deterministically.
+    event_a = asyncio.Event()
+    event_b = asyncio.Event()
+
+    async def fake_call_llm(prompt, max_tokens=500, model_override=None):
+        # Email A's prompt mentions "EMAIL_A", B's mentions "EMAIL_B"
+        if "EMAIL_A" in prompt:
+            # A starts first but finishes SECOND, after B signals it's done.
+            await event_b.wait()
+            return {
+                "content": json.dumps({
+                    "importante": True, "prioridade": "Alta", "categoria": "cliente",
+                    "confianca": 0.9, "razao": "A reason",
+                }),
+                "prompt_tokens": 111, "completion_tokens": 11,
+                "total_tokens": 122, "reasoning_tokens": 0,
+                "cost_usd": 0.00111, "model_used": "model-A",
+            }
+        else:
+            await asyncio.sleep(0)  # yield so A starts first
+            result = {
+                "content": json.dumps({
+                    "importante": False, "prioridade": "Baixa", "categoria": "outro",
+                    "confianca": 0.3, "razao": "B reason",
+                }),
+                "prompt_tokens": 222, "completion_tokens": 22,
+                "total_tokens": 244, "reasoning_tokens": 0,
+                "cost_usd": 0.00222, "model_used": "model-B",
+            }
+            event_b.set()
+            return result
+
+    llm._call_llm = fake_call_llm  # type: ignore[method-assign]
+
+    email_a = {"from": "a@t.com", "to": "me@t.com", "subject": "EMAIL_A",
+               "body": "EMAIL_A body", "body_clean": "EMAIL_A body"}
+    email_b = {"from": "b@t.com", "to": "me@t.com", "subject": "EMAIL_B",
+               "body": "EMAIL_B body", "body_clean": "EMAIL_B body"}
+    ctx = {"vips": [], "urgency_words": [], "ignore_words": []}
+
+    (res_a, meta_a), (res_b, meta_b) = await asyncio.gather(
+        llm.classify_email(email_a, ctx),
+        llm.classify_email(email_b, ctx),
+    )
+
+    # Each call must return metadata scoped to ITS OWN email.
+    assert meta_a.model == "model-A"
+    assert meta_a.prompt_tokens_total == 111
+    assert meta_a.completion_tokens_total == 11
+
+    assert meta_b.model == "model-B"
+    assert meta_b.prompt_tokens_total == 222
+    assert meta_b.completion_tokens_total == 22
+
+    # And the two metadata objects must be distinct instances (no aliasing).
+    assert meta_a is not meta_b
+    # Singleton must NOT carry cross-email state anymore.
+    assert not hasattr(llm, "last_validation") or not getattr(llm, "last_validation")
