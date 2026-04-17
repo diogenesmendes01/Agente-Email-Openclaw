@@ -122,6 +122,38 @@ class TestPromptSizeManagement:
         estimated_tokens = len(prompt) // 4
         assert estimated_tokens <= 7000  # Some tolerance
 
+    def test_action_prompt_preserves_instructions_when_long(self, llm):
+        """Long email body must not cause _manage_prompt_size to strip
+        CLASSIFICACAO / RESUMO / JSON instructions (including acao_usuario).
+        Body is truncated at 2000 chars before being inserted into the prompt."""
+        email = {
+            "from": "a@b.com",
+            "to": "me@test.com",
+            "subject": "Longo",
+            "body_clean": "L" * 50000,  # very long body
+        }
+        classification = {"prioridade": "Alta", "importante": True, "categoria": "cliente"}
+        summary = {"resumo": "resumo breve"}
+        config = {"auto_reply": False}
+        context = {
+            "company_profile": {"nome": "Acme", "tom": "profissional", "idioma": "pt-BR"},
+            "sender_profile": {},
+        }
+        prompt = llm._build_action_prompt(email, classification, summary, config, context)
+
+        # Body was pre-truncated to 2000 chars + marker
+        assert "[...corpo truncado...]" in prompt
+        assert "L" * 2000 in prompt
+        assert "L" * 2001 not in prompt
+
+        # Critical structural blocks must survive
+        assert "CLASSIFICACAO:" in prompt
+        assert "RESUMO:" in prompt
+        assert "Responda em JSON" in prompt
+        assert "acao_usuario" in prompt
+        assert "rascunho_resposta" in prompt
+        assert "ACOES POSSIVEIS" in prompt
+
     def test_short_prompt_unchanged(self, llm):
         """Prompt under 6000 tokens should pass through unchanged"""
         email = {"from": "a@b.com", "to": "me@test.com", "subject": "Test", "body": "Hello world"}

@@ -497,12 +497,17 @@ Responda em JSON:
                 f"O destinatario do rascunho e o REMETENTE do email (campo 'De').\n"
             )
 
+        body_raw = (email.get("body_clean") or email.get("body", "") or "")
+        body_for_prompt = body_raw[:2000]
+        if len(body_raw) > 2000:
+            body_for_prompt += "\n[...corpo truncado...]"
+
         prompt = f"""Decida a acao apropriada para este email.
 {owner_section}
 EMAIL:
 De: {email.get("from", "")}
 Assunto: {email.get("subject", "")}
-Corpo: {(email.get("body_clean") or email.get("body", ""))[:2000]}
+Corpo: {body_for_prompt}
 
 CLASSIFICACAO: {json.dumps(classification, ensure_ascii=False)}
 
