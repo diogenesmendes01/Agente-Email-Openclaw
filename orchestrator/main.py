@@ -6,7 +6,7 @@ FastAPI app que recebe webhooks do Gmail e processa emails
 import os
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from collections import OrderedDict
 from pathlib import Path
@@ -243,7 +243,7 @@ async def health_check():
     status = "healthy" if all(checks.values()) else "degraded"
     return {
         "status": status,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "services": {k: "connected" if v else "disconnected" for k, v in checks.items()},
         "queue": queue_info,
     }
@@ -343,7 +343,7 @@ async def gmail_webhook(
                 "status": "accepted",
                 "email_id": email_id,
                 "account": account,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
         )
 

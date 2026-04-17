@@ -11,7 +11,7 @@ import logging
 import hashlib
 from typing import Dict, Any, List
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ class LearningEngine:
                             "value": corr,
                             "confidence": round(confidence, 2),
                             "evidence_count": count,
-                            "created_at": datetime.utcnow().strftime("%Y-%m-%d"),
+                            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                         })
             # Category rules
             cat_counts = self._count_category_directions(emails)
@@ -117,7 +117,7 @@ class LearningEngine:
                             "value": corr,
                             "confidence": round(confidence, 2),
                             "evidence_count": count,
-                            "created_at": datetime.utcnow().strftime("%Y-%m-%d"),
+                            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                         })
         return rules
 
@@ -145,7 +145,7 @@ class LearningEngine:
                             "value": corr,
                             "confidence": round(confidence, 2),
                             "evidence_count": count,
-                            "created_at": datetime.utcnow().strftime("%Y-%m-%d"),
+                            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                         })
             cat_counts = self._count_category_directions(emails)
             for (orig, corr), count in cat_counts.items():
@@ -160,7 +160,7 @@ class LearningEngine:
                             "value": corr,
                             "confidence": round(confidence, 2),
                             "evidence_count": count,
-                            "created_at": datetime.utcnow().strftime("%Y-%m-%d"),
+                            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                         })
         return rules
 
@@ -200,7 +200,7 @@ class LearningEngine:
                             "value": corr,
                             "confidence": round(confidence, 2),
                             "evidence_count": count,
-                            "created_at": datetime.utcnow().strftime("%Y-%m-%d"),
+                            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                         })
         return rules
 

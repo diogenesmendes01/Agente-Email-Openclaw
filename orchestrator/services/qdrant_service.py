@@ -5,7 +5,7 @@ Qdrant Service - Vector Database para memória de emails
 import os
 import logging
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -107,7 +107,7 @@ class QdrantService:
                             "category": metadata.get("categoria", ""),
                             "action": metadata.get("acao", ""),
                             "feedback": metadata.get("feedback", "pendente"),
-                            "timestamp": metadata.get("timestamp", datetime.utcnow().isoformat()),
+                            "timestamp": metadata.get("timestamp", datetime.now(timezone.utc).isoformat()),
                             "thread_id": metadata.get("thread_id", ""),
                             "resumo": metadata.get("resumo", "")
                         }
@@ -237,7 +237,7 @@ class QdrantService:
             updated_payload = {
                 **point[0].payload,
                 "feedback": feedback,
-                "feedback_date": datetime.utcnow().strftime("%Y-%m-%d")
+                "feedback_date": datetime.now(timezone.utc).strftime("%Y-%m-%d")
             }
             if feedback == "corrected":
                 if original_priority:
@@ -332,7 +332,7 @@ class QdrantService:
                 points.append(models.PointStruct(
                     id=point_id,
                     vector=[0.0],
-                    payload={**rule, "last_updated": datetime.utcnow().isoformat()}
+                    payload={**rule, "last_updated": datetime.now(timezone.utc).isoformat()}
                 ))
             self.client.upsert(
                 collection_name=self.COLLECTION_LEARNED_RULES,
@@ -440,7 +440,7 @@ class QdrantService:
                         "rule_type": "_counter",
                         "account": account,
                         "count": count,
-                        "last_updated": datetime.utcnow().isoformat()
+                        "last_updated": datetime.now(timezone.utc).isoformat()
                     }
                 )]
             )
