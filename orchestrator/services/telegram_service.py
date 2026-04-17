@@ -246,8 +246,9 @@ class TelegramService:
             for a in unread_pdfs:
                 motivo = a.get("motivo_falha") or "desconhecido"
                 motivo_human = {
-                    "senha_ausente": "Protegido por senha (nenhuma cadastrada)",
-                    "senha_incorreta": "Protegido por senha (as cadastradas não abriram)",
+                    "sem_senha_cadastrada": "Protegido por senha (nenhuma cadastrada p/ remetente)",
+                    "senha_incorreta": "Protegido por senha (cadastradas não abriram)",
+                    "senha_ausente": "Protegido por senha (nenhuma cadastrada)",  # legacy alias
                     "ocr_falhou": "PDF escaneado — OCR falhou",
                     "corrompido": "Arquivo corrompido",
                     "download_falhou": "Falha ao baixar do Gmail",

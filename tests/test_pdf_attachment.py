@@ -73,7 +73,7 @@ async def test_detects_protected_pdf_without_password():
     result = await extract_pdf_attachment(data, "boleto.pdf")
     assert result["leitura_sucesso"] is False
     assert result["tipo"] == "protegido"
-    assert result["motivo_falha"] == "senha_ausente"
+    assert result["motivo_falha"] == "sem_senha_cadastrada"
     assert result["texto"] is None
 
 

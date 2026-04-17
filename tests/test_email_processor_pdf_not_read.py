@@ -85,7 +85,7 @@ async def test_unread_pdf_injects_explicit_marker_not_filename_content():
     pa = email["pdf_attachments"][0]
     assert pa["leitura_sucesso"] is False
     assert pa["tipo"] == "protegido"
-    assert pa["motivo_falha"] == "senha_ausente"
+    assert pa["motivo_falha"] == "sem_senha_cadastrada"
 
 
 @pytest.mark.asyncio

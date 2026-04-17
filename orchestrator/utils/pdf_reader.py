@@ -228,6 +228,8 @@ async def extract_pdf_attachment(
         "senha_usada_hash": None,
         "matched_password_id": None,   # caller may use to touch usage counter
         "inferred_password": None,     # plaintext of inferred password that worked (for offer-to-save flow)
+        "pattern_used": None,          # sender_pattern of cadastrada that worked (for rate-limit scoping)
+        "patterns_attempted": [],      # sender_patterns of cadastradas actually tried against this PDF
     }
 
     if not pdf_bytes:
@@ -290,18 +292,26 @@ async def extract_pdf_attachment(
     result["tipo"] = "protegido"
 
     # 2a. cadastradas
+    attempted_patterns: List[str] = []
+    any_cadastrada_attempted = False
     for entry in (passwords_cadastradas or []):
         pwd = entry.get("password")
         if not pwd:
             continue
+        any_cadastrada_attempted = True
+        pat = entry.get("pattern")
+        if pat and pat not in attempted_patterns:
+            attempted_patterns.append(pat)
         text = _try_open_with_password(pdf_bytes, pwd)
         if text is not None and text.strip():
             result["texto"] = text[:MAX_CHARS]
             result["leitura_sucesso"] = True
             result["senha_usada_hash"] = hash_password(pwd)
             result["matched_password_id"] = entry.get("id")
+            result["pattern_used"] = pat
             result["campos"] = _extract_fields(result["texto"])
             return result
+    result["patterns_attempted"] = attempted_patterns
 
     # 2b. inferidas do corpo
     for pwd in (inferred_candidates or []):
@@ -315,10 +325,12 @@ async def extract_pdf_attachment(
             return result
 
     # 2c. desconhecida — explicit failure, DO NOT fabricate content
-    if passwords_cadastradas:
+    # Distinguish between "no password registered for this sender" and
+    # "registered passwords existed but none of them worked".
+    if any_cadastrada_attempted:
         result["motivo_falha"] = "senha_incorreta"
     else:
-        result["motivo_falha"] = "senha_ausente"
+        result["motivo_falha"] = "sem_senha_cadastrada"
     return result
 
 

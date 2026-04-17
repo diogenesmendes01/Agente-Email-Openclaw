@@ -573,15 +573,15 @@ class EmailProcessor:
                         await self.db.touch_pdf_password(result["matched_password_id"])
                     except Exception:
                         pass
-                # Reset rate-limit counters on success
-                if account_id:
-                    for c in cadastradas:
-                        pdf_ratelimit.record_success(account_id, c["pattern"])
+                # Reset rate-limit counters on success — ONLY for the pattern that worked
+                if account_id and result.get("pattern_used"):
+                    pdf_ratelimit.record_success(account_id, result["pattern_used"])
             else:
                 motivo = result.get("motivo_falha") or "desconhecido"
                 motivo_human = {
-                    "senha_ausente": "protegido por senha — nenhuma senha cadastrada foi capaz de abrir",
-                    "senha_incorreta": "protegido por senha — as senhas cadastradas não funcionaram",
+                    "sem_senha_cadastrada": "protegido por senha — nenhuma senha está cadastrada para este remetente",
+                    "senha_incorreta": "protegido por senha — senhas cadastradas para este remetente não funcionaram",
+                    "senha_ausente": "protegido por senha — nenhuma senha cadastrada foi capaz de abrir",  # legacy alias
                     "ocr_falhou": "escaneado — OCR não extraiu texto",
                     "corrompido": "arquivo corrompido ou formato inválido",
                     "download_falhou": "falha ao baixar o anexo do Gmail",
@@ -590,14 +590,16 @@ class EmailProcessor:
                     f"\n\n--- ANEXO PDF NÃO LIDO: {filename} "
                     f"(MOTIVO: {motivo_human}) ---"
                 )
-                # Rate-limit: count failure against the best-matching cadastrada pattern
-                if account_id and result.get("tipo") == "protegido" and cadastradas:
-                    for c in cadastradas:
-                        activated = pdf_ratelimit.record_failure(account_id, c["pattern"])
+                # Rate-limit: count failure ONLY against patterns actually attempted on this PDF.
+                # If no pattern matched this sender (sem_senha_cadastrada), there's nothing to
+                # rate-limit — don't touch unrelated patterns registered on the account.
+                if account_id and result.get("tipo") == "protegido":
+                    for pattern in (result.get("patterns_attempted") or []):
+                        activated = pdf_ratelimit.record_failure(account_id, pattern)
                         if activated:
                             try:
                                 await self.db.lock_pdf_pattern(
-                                    account_id, c["pattern"], minutes=30,
+                                    account_id, pattern, minutes=30,
                                 )
                             except Exception:
                                 pass
