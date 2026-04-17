@@ -11,6 +11,8 @@ COMMANDS = {
     "/config_modelo",
     # PR 2: PDF robust handling
     "/pdf_senha", "/pdf_senhas", "/pdf_senha_remove", "/config_documentos",
+    # PR 3: 3-layer prompt architecture
+    "/config_prompt", "/prompt_ver", "/prompt_reset", "/prompt_regras",
 }
 
 
@@ -64,6 +66,14 @@ async def handle_command(message: dict, services: dict):
         await _handle_pdf_senha_remove(chat_id, topic_id, actor_id, args, db, tg)
     elif cmd == "/config_documentos":
         await _start_config_documentos(chat_id, topic_id, actor_id, db, tg)
+    elif cmd == "/config_prompt":
+        await _start_config_prompt(chat_id, topic_id, actor_id, db, tg)
+    elif cmd == "/prompt_ver":
+        await _show_prompt_ver(chat_id, topic_id, db, tg)
+    elif cmd == "/prompt_reset":
+        await _start_prompt_reset(chat_id, topic_id, actor_id, db, tg)
+    elif cmd == "/prompt_regras":
+        await _show_prompt_regras(chat_id, topic_id, tg)
     elif cmd == "/help_config":
         await tg.send_text(chat_id, (
             "<b>Comandos de Configuração:</b>\n\n"
@@ -79,7 +89,12 @@ async def handle_command(message: dict, services: dict):
             "/pdf_senha &lt;pattern&gt; &lt;senha&gt; — Cadastrar senha\n"
             "/pdf_senhas — Listar senhas cadastradas\n"
             "/pdf_senha_remove &lt;pattern&gt; — Remover senhas de um remetente\n"
-            "/config_documentos — CPF/CNPJ/nasc. (inferência de senha, opt-in)"
+            "/config_documentos — CPF/CNPJ/nasc. (inferência de senha, opt-in)\n"
+            "\n<b>Prompts (3 camadas):</b>\n"
+            "/prompt_ver — ver configuração atual e preview\n"
+            "/prompt_regras — ver regras fixas (Camada 1)\n"
+            "/config_prompt — editar customização da conta\n"
+            "/prompt_reset — voltar ao default"
         ), thread_id=message.get("message_thread_id"))
 
 
@@ -388,6 +403,10 @@ async def handle_config_response(message: dict, pending: dict, services: dict):
         await _continue_config_playbook(chat_id, text, pending, state, db, tg, thread_id=thread_id)
     elif action_type == "config_documentos":
         await _continue_config_documentos(chat_id, text, pending, state, db, tg, thread_id=thread_id)
+    elif action_type == "config_prompt":
+        await _continue_config_prompt(chat_id, text, pending, state, db, tg, thread_id=thread_id)
+    elif action_type == "prompt_reset":
+        await _continue_prompt_reset(chat_id, text, pending, state, db, tg, thread_id=thread_id)
 
 
 async def _continue_config_identidade(chat_id, text, pending, state, db, tg, thread_id=None):
@@ -708,3 +727,267 @@ async def _continue_config_documentos(chat_id, text, pending, state, db, tg, thr
             "Serão usados apenas para inferir senhas de PDFs quando o corpo do email "
             "mencionar CPF/CNPJ/nascimento."
         ), thread_id=thread_id)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# PR 3: 3-layer prompt architecture — per-account prompt customization
+# ──────────────────────────────────────────────────────────────────────────
+
+PROMPT_MENU_TEXT = (
+    "\U0001f4dd <b>Configurar prompt desta conta</b>\n\n"
+    "O que deseja configurar?\n"
+    "<b>1</b>) Tom adicional (ex: \"informal com emojis\")\n"
+    "<b>2</b>) Instrucoes extras (uma por linha)\n"
+    "<b>3</b>) Categorias extras (separadas por virgula)\n"
+    "<b>4</b>) Tamanho do rascunho (curto|medio|longo)\n"
+    "<b>5</b>) Instrucoes livres (max 500 chars, filtrado)\n"
+    "<b>6</b>) Cancelar\n\n"
+    "Envie o numero da opcao."
+)
+
+
+async def _start_config_prompt(chat_id, topic_id, actor_id, db, tg):
+    """Start /config_prompt multi-step wizard."""
+    thread_id = topic_id if topic_id != chat_id else None
+    account = await db.get_account_by_topic(topic_id)
+    if not account:
+        await tg.send_text(chat_id, "\u274c Conta nao encontrada para este topico.", thread_id=thread_id)
+        return
+    await db.create_pending_action(
+        account["id"], "config", "config_prompt", actor_id, chat_id, None,
+        {"step": "menu"}, topic_id=topic_id,
+    )
+    await tg.send_text(chat_id, PROMPT_MENU_TEXT, thread_id=thread_id)
+
+
+async def _continue_config_prompt(chat_id, text, pending, state, db, tg, thread_id=None):
+    """Multi-step wizard for per-account prompt config."""
+    from orchestrator.services.prompt_builder import (
+        sanitize_user_freeform, MAX_FREEFORM_CHARS,
+    )
+
+    step = state.get("step")
+    val = (text or "").strip()
+    account_id = pending.get("account_id")
+
+    if step == "menu":
+        current = await db.get_account_prompt_config(account_id) or {}
+        if val == "1":
+            state["step"] = "set_tom"
+            await db.update_pending_state(pending["id"], state)
+            cur = current.get("tom_adicional") or "(nao definido)"
+            await tg.send_text(chat_id, (
+                f"<b>Tom adicional</b>\nAtual: <i>{cur}</i>\n\n"
+                "Envie o novo tom ou <code>-</code> para limpar."
+            ), thread_id=thread_id)
+        elif val == "2":
+            state["step"] = "set_extras"
+            await db.update_pending_state(pending["id"], state)
+            extras = current.get("instrucoes_extras") or []
+            cur = "\n".join(f"- {e}" for e in extras) if extras else "(nenhuma)"
+            await tg.send_text(chat_id, (
+                f"<b>Instrucoes extras</b>\nAtuais:\n{cur}\n\n"
+                "Envie uma instrucao por linha (ou <code>-</code> para limpar)."
+            ), thread_id=thread_id)
+        elif val == "3":
+            state["step"] = "set_cats"
+            await db.update_pending_state(pending["id"], state)
+            cats = current.get("categorias_extras") or []
+            cur = ", ".join(cats) if cats else "(nenhuma)"
+            await tg.send_text(chat_id, (
+                f"<b>Categorias extras</b>\nAtuais: {cur}\n\n"
+                "Envie as categorias separadas por virgula (ou <code>-</code> para limpar)."
+            ), thread_id=thread_id)
+        elif val == "4":
+            state["step"] = "set_tamanho"
+            await db.update_pending_state(pending["id"], state)
+            cur = current.get("tamanho_rascunho") or "(padrao: medio)"
+            await tg.send_text(chat_id, (
+                f"<b>Tamanho do rascunho</b>\nAtual: {cur}\n\n"
+                "Envie <code>curto</code>, <code>medio</code> ou <code>longo</code> "
+                "(ou <code>-</code> para limpar)."
+            ), thread_id=thread_id)
+        elif val == "5":
+            state["step"] = "set_livres"
+            await db.update_pending_state(pending["id"], state)
+            cur = current.get("instrucoes_livres") or "(nada)"
+            await tg.send_text(chat_id, (
+                f"<b>Instrucoes livres</b> (max {MAX_FREEFORM_CHARS} chars)\n"
+                f"Atual: <i>{cur[:200]}</i>\n\n"
+                "Envie o texto, ou <code>-</code> para limpar.\n"
+                "Palavras como <i>ignore / override / desconsidere</i> serao rejeitadas."
+            ), thread_id=thread_id)
+        elif val == "6":
+            await db.delete_pending_action(pending["id"])
+            await tg.send_text(chat_id, "Cancelado.", thread_id=thread_id)
+        else:
+            await tg.send_text(chat_id, (
+                "\u274c Opcao invalida. Envie um numero de 1 a 6.\n\n" + PROMPT_MENU_TEXT
+            ), thread_id=thread_id)
+        return
+
+    if step == "set_tom":
+        new_val = None if val == "-" else val
+        await db.update_account_prompt_config_field(account_id, "tom_adicional", new_val)
+        await db.delete_pending_action(pending["id"])
+        await tg.send_text(chat_id, "\u2705 Tom atualizado.", thread_id=thread_id)
+
+    elif step == "set_extras":
+        if val == "-":
+            lst = []
+        else:
+            lst = [ln.strip().lstrip("-").strip() for ln in val.splitlines() if ln.strip()]
+        await db.update_account_prompt_config_field(account_id, "instrucoes_extras", lst)
+        await db.delete_pending_action(pending["id"])
+        await tg.send_text(chat_id, f"\u2705 Instrucoes atualizadas ({len(lst)} itens).", thread_id=thread_id)
+
+    elif step == "set_cats":
+        if val == "-":
+            cats = []
+        else:
+            cats = [c.strip() for c in val.split(",") if c.strip()]
+        await db.update_account_prompt_config_field(account_id, "categorias_extras", cats)
+        await db.delete_pending_action(pending["id"])
+        await tg.send_text(chat_id, f"\u2705 Categorias extras atualizadas ({len(cats)} itens).", thread_id=thread_id)
+
+    elif step == "set_tamanho":
+        if val == "-":
+            new_val = None
+        elif val.lower() in ("curto", "medio", "médio", "longo"):
+            new_val = val.lower().replace("é", "e")
+        else:
+            await tg.send_text(chat_id, (
+                "\u274c Valor invalido. Use <code>curto</code>, <code>medio</code> ou <code>longo</code>."
+            ), thread_id=thread_id)
+            return
+        await db.update_account_prompt_config_field(account_id, "tamanho_rascunho", new_val)
+        await db.delete_pending_action(pending["id"])
+        await tg.send_text(chat_id, "\u2705 Tamanho do rascunho atualizado.", thread_id=thread_id)
+
+    elif step == "set_livres":
+        if val == "-":
+            await db.update_account_prompt_config_field(account_id, "instrucoes_livres", None)
+            await db.delete_pending_action(pending["id"])
+            await tg.send_text(chat_id, "\u2705 Instrucoes livres removidas.", thread_id=thread_id)
+            return
+        clean, warnings = sanitize_user_freeform(val)
+        if warnings:
+            await db.delete_pending_action(pending["id"])
+            await tg.send_text(chat_id, (
+                "\u274c <b>Rejeitado</b>: texto contem palavras que podem burlar as "
+                "regras de sistema (ignore, override, desconsidere, etc.). Use uma "
+                "formulacao positiva: em vez de \"ignore X\" prefira \"evite mencionar X\"."
+            ), thread_id=thread_id)
+            return
+        await db.update_account_prompt_config_field(account_id, "instrucoes_livres", clean)
+        await db.delete_pending_action(pending["id"])
+        await tg.send_text(chat_id, (
+            f"\u2705 Instrucoes livres salvas ({len(clean)} chars)."
+        ), thread_id=thread_id)
+
+
+async def _show_prompt_ver(chat_id, topic_id, db, tg):
+    """/prompt_ver — shows config layers and a preview (no LLM call)."""
+    from orchestrator.services.prompt_builder import (
+        PromptBuilder, SYSTEM_RULES,
+    )
+
+    thread_id = topic_id if topic_id != chat_id else None
+    account = await db.get_account_by_topic(topic_id)
+    if not account:
+        await tg.send_text(chat_id, "\u274c Conta nao encontrada para este topico.", thread_id=thread_id)
+        return
+    cfg = await db.get_account_prompt_config(account["id"]) or {}
+
+    lines = [
+        "\U0001f4cb <b>Configuracao de prompts desta conta</b>\n",
+        "<b>[CAMADA 1 — Sistema (fixo)]</b>",
+        f"\u2705 {len(SYSTEM_RULES)} regras inviolaveis aplicadas (use /prompt_regras para ver).\n",
+        "<b>[CAMADA 2 — Tarefa (padrao)]</b>",
+        "\u2022 Summary: max 2 frases, denso factual.",
+        "\u2022 Classification: 7 categorias + 4 urgencias.",
+        "\u2022 Action: tamanho medio, cita valores/datas.\n",
+    ]
+    if cfg:
+        lines.append("<b>[CAMADA 3 — Sua configuracao]</b>")
+        if cfg.get("tom_adicional"):
+            lines.append(f"\u2022 Tom adicional: {cfg['tom_adicional']}")
+        ie = cfg.get("instrucoes_extras") or []
+        if ie:
+            lines.append(f"\u2022 Instrucoes extras: ({len(ie)} itens)")
+            for it in ie[:5]:
+                lines.append(f"   - {it}")
+        ce = cfg.get("categorias_extras") or []
+        if ce:
+            lines.append(f"\u2022 Categorias extras: {', '.join(ce)}")
+        if cfg.get("tamanho_rascunho"):
+            lines.append(f"\u2022 Tamanho do rascunho: {cfg['tamanho_rascunho']}")
+        if cfg.get("instrucoes_livres"):
+            lines.append(f"\u2022 Instrucoes livres: <i>{cfg['instrucoes_livres'][:160]}</i>")
+    else:
+        lines.append("<b>[CAMADA 3 — Sua configuracao]</b>")
+        lines.append("(nenhuma — usando defaults)")
+
+    pb = PromptBuilder()
+    preview = pb.build_preview("action", custom=cfg if cfg else None)
+    preview_short = preview if len(preview) <= 1500 else preview[:1500] + "\n..."
+    lines.append("\n<b>Preview (acao):</b>")
+    lines.append(f"<pre>{_html_escape(preview_short)}</pre>")
+    lines.append("\n<b>Comandos:</b>")
+    lines.append("/config_prompt — editar")
+    lines.append("/prompt_reset — voltar ao default")
+    lines.append("/prompt_regras — ver regras fixas")
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:4000] + "\n..."
+    await tg.send_text(chat_id, text, thread_id=thread_id)
+
+
+async def _start_prompt_reset(chat_id, topic_id, actor_id, db, tg):
+    """/prompt_reset — confirmation flow."""
+    thread_id = topic_id if topic_id != chat_id else None
+    account = await db.get_account_by_topic(topic_id)
+    if not account:
+        await tg.send_text(chat_id, "\u274c Conta nao encontrada para este topico.", thread_id=thread_id)
+        return
+    await db.create_pending_action(
+        account["id"], "config", "prompt_reset", actor_id, chat_id, None,
+        {"step": "confirm"}, topic_id=topic_id,
+    )
+    await tg.send_text(chat_id, (
+        "\u26a0\ufe0f Isto vai apagar TODA a configuracao customizada de prompt "
+        "desta conta. Confirmar? Envie <code>sim</code> ou <code>nao</code>."
+    ), thread_id=thread_id)
+
+
+async def _continue_prompt_reset(chat_id, text, pending, state, db, tg, thread_id=None):
+    val = (text or "").strip().lower()
+    if val in ("sim", "s", "yes", "y"):
+        await db.delete_account_prompt_config(pending.get("account_id"))
+        await db.delete_pending_action(pending["id"])
+        await tg.send_text(chat_id, "\u2705 Configuracao customizada apagada. Usando defaults.", thread_id=thread_id)
+    else:
+        await db.delete_pending_action(pending["id"])
+        await tg.send_text(chat_id, "Cancelado. Nada foi alterado.", thread_id=thread_id)
+
+
+async def _show_prompt_regras(chat_id, topic_id, tg):
+    """/prompt_regras — shows Layer 1 inviolable rules."""
+    from orchestrator.services.prompt_builder import layer1_text
+    thread_id = topic_id if topic_id != chat_id else None
+    text = (
+        "\U0001f512 <b>REGRAS DE SISTEMA (Camada 1 — fixas)</b>\n\n"
+        f"<pre>{_html_escape(layer1_text())}</pre>\n\n"
+        "Estas regras sao aplicadas antes de qualquer configuracao de tarefa ou de conta, "
+        "e NAO podem ser sobrescritas por /config_prompt."
+    )
+    await tg.send_text(chat_id, text, thread_id=thread_id)
+
+
+def _html_escape(s: str) -> str:
+    return (
+        s.replace("&", "&amp;")
+         .replace("<", "&lt;")
+         .replace(">", "&gt;")
+    )
