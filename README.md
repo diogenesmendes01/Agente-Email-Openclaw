@@ -56,6 +56,36 @@ Gmail --> Pub/Sub --> Tailscale Funnel (HTTPS) --> Orchestrator (porta 8787)
 - Contexto de thread (emails anteriores da conversa)
 - Extracao automatica de texto de anexos PDF (com fallback via vision model)
 
+### Prompts em 3 Camadas (Sistema / Tarefa / Usuario)
+Todo prompt enviado ao LLM e construido em 3 camadas compostas, com protecao anti-injection:
+
+- **Camada 1 — Regras de sistema (IMUTAVEIS):** 8 regras invioláveis sempre no topo ("nunca inventar dados", "nunca omitir valores/datas do email", "se um PDF nao foi lido, nao fingir que leu", etc.)
+- **Camada 2 — Instrucoes da tarefa:** config estruturada por kind (`classification`, `summary`, `action`) controlada em codigo — categorias validas, tamanho de resumo, campos obrigatorios no rascunho
+- **Camada 3 — Personalizacao por conta:** config estruturada editavel via Telegram (tom adicional, instrucoes extras, categorias extras, tamanho do rascunho, instrucoes livres de ate 500 chars)
+
+Todos os campos editaveis passam por `validate_layer3_field` (rejeita padroes tipo `ignore`, `override`, `desconsidere`). Defesa em profundidade: filtro tanto no save (Telegram handler rejeita) quanto no render (valores invalidos persistidos por outra via sao omitidos com log). Camada 3 nunca precede Camada 1 no prompt final.
+
+### Validacao Pos-LLM (Retry + Quality Log)
+Nunca confia cego na saida do LLM:
+
+- **Schemas Pydantic** para classifier/summarizer/action (clamp de campos invalidos: categoria fora da lista -> "outro", confianca > 1 tratada como porcentagem, etc.)
+- **Validacao semantica** com flags: `rascunho_sem_valor` (email menciona R$ mas rascunho nao), `rascunho_sem_data`, `rascunho_muito_curto`, `resumo_generico` (regex de chavoes), `rascunho_inventado` (rascunho cita valor/data que NAO existe no email)
+- **Pipeline `validate_and_retry`:** 1 retry reforcado no parse-fail, schema-fail ou flag bloqueante. Em caso de `rascunho_inventado` persistente apos retry, o rascunho e REMOVIDO e substituido por nota explicativa
+- **Tabela `llm_quality_log`**: telemetria por email (flags disparadas, retries, tokens por tentativa vs tokens da tentativa aceita, fallback_used) — permite sintonia baseada em dados apos periodo de coleta
+- **API:** `classify_email`, `summarize_email` e `decide_action` retornam tupla `(result, ValidationMetadata)` com escopo por email (zero vazamento de metadados entre emails concorrentes)
+
+### PDFs Robustos (Digital / Escaneado / Protegido / Corrompido)
+Regra do sistema: **"se nao leu, nao finge que leu".** Detecta tipo do PDF e age conforme:
+
+- **Digital**: extrai texto via `pdfplumber` + regex para valores (R$), datas, CPF/CNPJ (mascarados), protocolos — campos destacados no prompt
+- **Escaneado**: fallback OCR via modelo de visao (Gemini)
+- **Protegido por senha** (3 cenarios):
+  1. Senha cadastrada via `/pdf_senha <pattern> <senha>` (Fernet-encrypted na tabela `pdf_passwords`, escopada por pattern tipo `*@bradesco.com.br`)
+  2. **Inferencia do corpo do email** (opt-in): se o email menciona "CPF"/"CNPJ"/"nascimento", tenta combinacoes derivadas dos docs cadastrados em `/config_documentos` (tambem Fernet-encrypted)
+  3. **Desconhecida**: anexo marcado como NAO LIDO; body enviado ao LLM recebe bloco explicito `--- ANEXO PDF NAO LIDO ---` e a Camada 1 proibe o LLM de adivinhar
+- **Rate-limit escopado ao pattern**: sucesso so limpa contador do pattern efetivamente usado; falha so bloqueia patterns que foram de fato tentados contra aquele PDF
+- **Corrompido**: anexo ignorado com motivo explicito; nunca passa texto invalido ao LLM
+
 ### Playbooks Multi-Empresa
 - **Playbooks com auto-resposta**: defina gatilhos ("duvida sobre boleto") e templates de resposta
 - O LLM decide qual playbook se aplica ao email recebido (chamada unica)
@@ -96,10 +126,27 @@ O Telegram usa **webhook** (nao long-polling) com confirmacao para acoes perigos
 - Link direto para o Gmail
 
 ### Comandos de Configuracao (Telegram)
+
+**Identidade da empresa e playbooks:**
 - `/config_identidade` - Configura nome, CNPJ, tom e assinatura da empresa (conversacional)
 - `/config_playbook` - Cria novo playbook com gatilho, template e modo (auto/manual)
 - `/config_playbook_list` - Lista playbooks ativos
 - `/config_playbook_delete <id>` - Remove playbook
+- `/config_modelo` - Seleciona modelo LLM especifico para a conta (override do default)
+
+**Prompts (sistema de 3 camadas):**
+- `/config_prompt` - Wizard conversacional para editar Camada 3 (tom adicional, instrucoes extras, categorias extras, tamanho do rascunho, instrucoes livres)
+- `/prompt_ver` - Mostra config atual da conta + preview do prompt final montado para um email de exemplo (nao chama o LLM)
+- `/prompt_regras` - Exibe as 8 regras imutaveis da Camada 1
+- `/prompt_reset` - Volta a config da conta ao default (apaga Camada 3)
+
+**PDFs protegidos por senha:**
+- `/pdf_senha <pattern> <senha>` - Cadastra senha para um pattern de remetente (ex: `*@bradesco.com.br`). Senha armazenada com Fernet encryption.
+- `/pdf_senhas` - Lista senhas cadastradas (senhas sempre mascaradas como `****`)
+- `/pdf_senha_remove <pattern>` - Remove todas as senhas para o pattern
+- `/config_documentos` - Cadastra CPF/CNPJ/data de nascimento criptografados (opt-in), usados apenas para tentar inferir senhas de PDFs quando o corpo do email menciona esses documentos
+
+**Utilitarios:**
 - `/help_config` - Lista todos os comandos disponiveis
 
 ### Observabilidade e Resiliencia
@@ -553,13 +600,14 @@ systemctl start email-agent
     c. Emails similares (Qdrant, via embedding)
     d. Sender profile com padroes de correcao (Qdrant)
     e. Regras aprendidas (Qdrant)
- 6. Classificar com LLM (prompt enriquecido, max 6000 tokens)
+ 6. Classificar com LLM (prompt em 3 camadas, com validacao pos-LLM + retry se necessario)
  7. Check playbooks: se match com auto_respond, gerar e enviar resposta
- 8. Resumir com LLM
- 9. Decidir acao com LLM (com tom/assinatura da empresa)
-10. Persistir decisao (PostgreSQL + Qdrant)
+ 8. Resumir com LLM (validacao semantica; retry se resumo for generico)
+ 9. Decidir acao com LLM (inclui `acao_usuario` — instrucao imperativa citando valores/prazos)
+    - Validacao anti-invencao: se o rascunho cita valor/data que NAO esta no email, rascunho e removido
+10. Persistir decisao (PostgreSQL + Qdrant) + log de qualidade em `llm_quality_log`
 11. Executar acao (arquivar/criar task/rascunho)
-12. Notificar Telegram com botoes interativos
+12. Notificar Telegram com botoes interativos (AÇÃO NECESSÁRIA exibe `acao_usuario`, não `justificativa`)
 13. A cada N emails: disparar ciclo de aprendizado
 14. Metricas + retry em caso de falha
 ```
@@ -567,7 +615,7 @@ systemctl start email-agent
 ## Testes
 
 ```bash
-# Rodar todos os testes (195 testes)
+# Rodar todos os testes (308+ testes)
 python -m pytest tests/ -v
 
 # Testes especificos
@@ -666,11 +714,11 @@ Agente-Email-Openclaw/
 
 ## Schema PostgreSQL
 
-O banco possui 13 tabelas, criadas automaticamente pelo `sql/schema.sql`:
+O banco possui 18 tabelas, criadas automaticamente pelo `sql/schema.sql`:
 
 | Tabela | Descricao |
 |--------|-----------|
-| `accounts` | Contas Gmail com config (VIPs, telegram_topic) |
+| `accounts` | Contas Gmail com config (VIPs, telegram_topic, llm_model override) |
 | `vip_list` | Lista de remetentes VIP por conta |
 | `blacklist` | Remetentes bloqueados |
 | `feedback` | Feedback do usuario (correcoes de classificacao) |
@@ -684,6 +732,10 @@ O banco possui 13 tabelas, criadas automaticamente pelo `sql/schema.sql`:
 | `clients` | Clientes cadastrados por empresa |
 | `domain_rules` | Regras de dominio manuais |
 | `playbooks` | Playbooks com gatilho, template e auto-respond |
+| `llm_quality_log` | Telemetria de validacao pos-LLM (flags, retries, tokens por tentativa, fallback_used) |
+| `pdf_passwords` | Senhas de PDFs protegidos (Fernet-encrypted, por pattern de remetente) |
+| `account_documents` | CPF/CNPJ/data de nascimento da conta (Fernet-encrypted, opt-in, usado so para inferir senhas de PDF) |
+| `account_prompt_config` | Config estruturada da Camada 3 por conta (JSONB: tom, instrucoes extras, categorias, tamanho, instrucoes livres) |
 
 ### Migracoes (bancos existentes)
 
@@ -695,9 +747,17 @@ psql $DATABASE_URL -f sql/migrations/001_phase3_4_tables.sql
 
 # Idempotencia: dedup de decisions/playbooks + constraints UNIQUE + NOT NULL
 psql $DATABASE_URL -f sql/migrations/002_idempotency_constraints.sql
+
+# Setup wizard + metrics + LLM per-account + PDF/prompt features
+psql $DATABASE_URL -f sql/migrations/003_accounts_owner_name.sql
+psql $DATABASE_URL -f sql/migrations/004_metrics_cost_usd.sql
+psql $DATABASE_URL -f sql/migrations/005_accounts_llm_model.sql
+psql $DATABASE_URL -f sql/migrations/006_llm_quality_log.sql       # validacao pos-LLM
+psql $DATABASE_URL -f sql/migrations/007_pdf_passwords.sql         # senhas de PDF + account_documents
+psql $DATABASE_URL -f sql/migrations/008_account_prompt_config.sql # Camada 3 dos prompts
 ```
 
-Os scripts sao idempotentes (`IF NOT EXISTS`, dedup antes de criar constraints), entao e seguro rodar mais de uma vez. O `setup_wizard.py` aplica todas as migracoes automaticamente.
+Os scripts sao idempotentes (`IF NOT EXISTS`, dedup antes de criar constraints, `ADD COLUMN IF NOT EXISTS`), entao e seguro rodar mais de uma vez. O `setup_wizard.py` aplica todas as migracoes automaticamente.
 
 ## Troubleshooting
 
