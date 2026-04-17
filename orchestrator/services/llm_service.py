@@ -11,6 +11,8 @@ import httpx
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
+from orchestrator.services.llm_validator import validate_and_retry, ValidationMetadata
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,6 +35,9 @@ class LLMService:
             self.openai_client = OpenAI(api_key=self.openai_key)
 
         self._configured = bool(self.openrouter_key)
+        # Holds ValidationMetadata from the most recent classify/summarize/decide
+        # call, keyed by kind. Consumed by email_processor for llm_quality_log.
+        self.last_validation: Dict[str, ValidationMetadata] = {}
 
         if self._configured:
             logger.info(f"LLMService configurado com modelo padrão {self.default_model}")
@@ -65,21 +70,24 @@ class LLMService:
         context: Dict[str, Any],
         model_override: str = None,
     ) -> Dict[str, Any]:
-        """Classifica email"""
+        """Classifica email (com validacao pos-LLM + 1 retry reforcado)."""
         prompt = self._build_classifier_prompt(email, context)
-        response = await self._call_llm(prompt, max_tokens=32768, model_override=model_override)
-        
-        if response:
-            result = self._parse_classification(response.get("content", ""))
-            result["prompt_tokens"] = response.get("prompt_tokens", 0)
-            result["completion_tokens"] = response.get("completion_tokens", 0)
-            result["total_tokens"] = response.get("total_tokens", 0)
-            result["reasoning_tokens"] = response.get("reasoning_tokens", 0)
-            result["cost_usd"] = response.get("cost_usd", 0.0)
-            return result
-        
-        return self._default_classification()
-    
+
+        async def _call(p: str):
+            return await self._call_llm(p, max_tokens=32768, model_override=model_override)
+
+        result, meta = await validate_and_retry(
+            kind="classification",
+            prompt=prompt,
+            call_llm_fn=_call,
+            email=email,
+            model=self._resolve_model(model_override),
+        )
+        self.last_validation["classification"] = meta
+        if meta.fallback_used and not result.get("razao"):
+            result["razao"] = "Classificação padrão (fallback da validação)"
+        return result
+
     async def summarize_email(
         self,
         email: Dict[str, Any],
@@ -87,21 +95,25 @@ class LLMService:
         context: Dict[str, Any] = None,
         model_override: str = None,
     ) -> Dict[str, Any]:
-        """Gera resumo"""
+        """Gera resumo (com validacao pos-LLM + 1 retry reforcado)."""
         prompt = self._build_summarizer_prompt(email, classification, context)
-        response = await self._call_llm(prompt, max_tokens=32768, model_override=model_override)
 
-        if response:
-            result = self._parse_summary(response.get("content", ""))
-            result["prompt_tokens"] = response.get("prompt_tokens", 0)
-            result["completion_tokens"] = response.get("completion_tokens", 0)
-            result["total_tokens"] = response.get("total_tokens", 0)
-            result["reasoning_tokens"] = response.get("reasoning_tokens", 0)
-            result["cost_usd"] = response.get("cost_usd", 0.0)
-            return result
+        async def _call(p: str):
+            return await self._call_llm(p, max_tokens=32768, model_override=model_override)
 
-        return {"resumo": "Erro ao gerar resumo", "entidades": {}, "prazo": None}
-    
+        result, meta = await validate_and_retry(
+            kind="summary",
+            prompt=prompt,
+            call_llm_fn=_call,
+            email=email,
+            classification=classification,
+            model=self._resolve_model(model_override),
+        )
+        self.last_validation["summary"] = meta
+        if meta.fallback_used and not result.get("resumo"):
+            result["resumo"] = "Erro ao gerar resumo"
+        return result
+
     async def decide_action(
         self,
         email: Dict[str, Any],
@@ -111,21 +123,25 @@ class LLMService:
         context: Dict[str, Any] = None,
         model_override: str = None,
     ) -> Dict[str, Any]:
-        """Decide ação a tomar"""
+        """Decide acao (com validacao pos-LLM + 1 retry reforcado)."""
         prompt = self._build_action_prompt(email, classification, summary, account_config, context)
 
-        response = await self._call_llm(prompt, max_tokens=32768, model_override=model_override)
+        async def _call(p: str):
+            return await self._call_llm(p, max_tokens=32768, model_override=model_override)
 
-        if response:
-            result = self._parse_action(response.get("content", ""))
-            result["prompt_tokens"] = response.get("prompt_tokens", 0)
-            result["completion_tokens"] = response.get("completion_tokens", 0)
-            result["total_tokens"] = response.get("total_tokens", 0)
-            result["reasoning_tokens"] = response.get("reasoning_tokens", 0)
-            result["cost_usd"] = response.get("cost_usd", 0.0)
-            return result
-
-        return {"acao": "notificar", "justificativa": "Erro ao decidir"}
+        result, meta = await validate_and_retry(
+            kind="action",
+            prompt=prompt,
+            call_llm_fn=_call,
+            email=email,
+            classification=classification,
+            summary=summary,
+            model=self._resolve_model(model_override),
+        )
+        self.last_validation["action"] = meta
+        if meta.fallback_used and not result.get("justificativa"):
+            result["justificativa"] = "Erro ao decidir"
+        return result
     
     async def create_embedding(self, text: str) -> Optional[List[float]]:
         """

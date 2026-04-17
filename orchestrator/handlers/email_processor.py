@@ -363,6 +363,28 @@ class EmailProcessor:
                 except Exception as e:
                     logger.error(f"[{email_id}] Erro no learning engine: {e}")
 
+            # Log LLM quality (validation telemetry) — best-effort, non-blocking
+            try:
+                for kind in ("classification", "summary", "action"):
+                    meta = self.llm.last_validation.get(kind)
+                    if meta is None:
+                        continue
+                    await self.db.log_llm_quality(
+                        account_id=account_id,
+                        email_id=email_id,
+                        kind=kind,
+                        model=meta.model,
+                        retries=meta.retries,
+                        flags=meta.flags,
+                        json_parse_failed=meta.json_parse_failed,
+                        schema_valid=meta.schema_valid,
+                        fallback_used=meta.fallback_used,
+                        prompt_tokens=meta.prompt_tokens,
+                        completion_tokens=meta.completion_tokens,
+                    )
+            except Exception as qe:
+                logger.warning(f"[{email_id}] llm_quality_log error: {qe}")
+
             # Record metrics
             if self.metrics and account_id:
                 await self.metrics.record(

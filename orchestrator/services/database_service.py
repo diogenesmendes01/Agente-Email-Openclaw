@@ -399,6 +399,40 @@ class DatabaseService:
             )
             return [dict(r) for r in rows]
 
+    # ── LLM Quality Log ──
+
+    async def log_llm_quality(
+        self,
+        account_id: Optional[int],
+        email_id: Optional[str],
+        kind: str,
+        model: Optional[str],
+        retries: int,
+        flags: List[str],
+        json_parse_failed: bool = False,
+        schema_valid: bool = True,
+        fallback_used: bool = False,
+        prompt_tokens: Optional[int] = None,
+        completion_tokens: Optional[int] = None,
+    ) -> Optional[int]:
+        """Persist one LLM validation event. Swallows errors (telemetry path)."""
+        try:
+            async with self._pool.acquire() as conn:
+                return await conn.fetchval(
+                    """INSERT INTO llm_quality_log
+                       (account_id, email_message_id, kind, model, retries, flags,
+                        json_parse_failed, schema_valid, fallback_used,
+                        prompt_tokens, completion_tokens)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                       RETURNING id""",
+                    account_id, email_id, kind, model, retries, list(flags or []),
+                    json_parse_failed, schema_valid, fallback_used,
+                    prompt_tokens, completion_tokens,
+                )
+        except Exception as e:
+            logger.warning(f"log_llm_quality failed: {e}")
+            return None
+
     # ── Account by Topic ──
 
     async def get_account_by_topic(self, topic_id):
