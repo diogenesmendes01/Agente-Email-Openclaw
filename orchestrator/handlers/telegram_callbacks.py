@@ -376,7 +376,7 @@ async def handle_text_message(message: dict, services: dict):
         return
 
     # Check for pending config conversation
-    for config_type in ("config_identidade", "config_playbook"):
+    for config_type in ("config_identidade", "config_playbook", "config_documentos"):
         pending = await db.get_pending_by_chat(chat_id, config_type, actor_id=actor_id, topic_id=topic_id)
         if pending:
             await handle_config_response(message, pending, services)

@@ -96,6 +96,7 @@ async def test_text_message_triggers_custom_reply():
     services["db"].get_pending_by_chat.side_effect = [
         None,  # No config_identidade pending
         None,  # No config_playbook pending
+        None,  # No config_documentos pending
         {"id": 1, "email_id": "em_1", "account_id": 1, "state": '{"original_text": "email body", "account": "u@t.com"}'},
     ]
     services["llm"].generate_custom_reply.return_value = "Draft reply"
@@ -114,6 +115,7 @@ async def test_text_message_triggers_task_creation():
     services["db"].get_pending_by_chat.side_effect = [
         None,  # No config_identidade pending
         None,  # No config_playbook pending
+        None,  # No config_documentos pending
         None,  # No custom_reply pending
         {"id": 2, "email_id": "em_2", "account_id": 1,
          "state": '{"account": "u@t.com", "subject": "Subj", "urgency": "high"}'},

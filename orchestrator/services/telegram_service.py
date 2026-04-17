@@ -238,6 +238,26 @@ class TelegramService:
             for line in rascunho_truncado.split("\n"):
                 lines.append(html.escape(line))
         
+        # PDF anexos não lidos — alerta explícito (regra: não fingir que leu).
+        pdf_attachments = email.get("pdf_attachments") or []
+        unread_pdfs = [a for a in pdf_attachments if not a.get("leitura_sucesso")]
+        if unread_pdfs:
+            lines.append("")
+            for a in unread_pdfs:
+                motivo = a.get("motivo_falha") or "desconhecido"
+                motivo_human = {
+                    "sem_senha_cadastrada": "Protegido por senha (nenhuma cadastrada p/ remetente)",
+                    "senha_incorreta": "Protegido por senha (cadastradas não abriram)",
+                    "senha_ausente": "Protegido por senha (nenhuma cadastrada)",  # legacy alias
+                    "ocr_falhou": "PDF escaneado — OCR falhou",
+                    "corrompido": "Arquivo corrompido",
+                    "download_falhou": "Falha ao baixar do Gmail",
+                }.get(motivo, motivo)
+                lines.append(
+                    f"📎 <b>Anexo não lido:</b> {html.escape(a.get('filename', 'arquivo.pdf'))}"
+                )
+                lines.append(f"   ({motivo_human})")
+
         # Rodapé
         lines.append("")
         if date_str:

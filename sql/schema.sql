@@ -169,6 +169,33 @@ CREATE TABLE IF NOT EXISTS domain_rules (
     UNIQUE(company_id, domain)
 );
 
+-- PR 2: PDF robust handling — password storage + account documents
+
+CREATE TABLE IF NOT EXISTS pdf_passwords (
+    id SERIAL PRIMARY KEY,
+    account_id INT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    sender_pattern TEXT NOT NULL,
+    password_encrypted TEXT NOT NULL,
+    label TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    last_used_at TIMESTAMPTZ,
+    use_count INT DEFAULT 0,
+    locked_until TIMESTAMPTZ,
+    UNIQUE (account_id, sender_pattern, password_encrypted)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pdf_passwords_account_pattern
+    ON pdf_passwords(account_id, sender_pattern);
+
+CREATE TABLE IF NOT EXISTS account_documents (
+    account_id INT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    cpf_encrypted TEXT,
+    cnpj_encrypted TEXT,
+    birthdate_encrypted TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS playbooks (
     id SERIAL PRIMARY KEY,
     company_id INT REFERENCES company_profiles(id) ON DELETE CASCADE,

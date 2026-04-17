@@ -9,6 +9,8 @@ COMMANDS = {
     "/config_identidade", "/config_playbook", "/config_playbook_list",
     "/config_playbook_delete", "/help_config", "/custos",
     "/config_modelo",
+    # PR 2: PDF robust handling
+    "/pdf_senha", "/pdf_senhas", "/pdf_senha_remove", "/config_documentos",
 }
 
 
@@ -54,6 +56,14 @@ async def handle_command(message: dict, services: dict):
         await _show_costs(chat_id, topic_id, args, db, tg, services)
     elif cmd == "/config_modelo":
         await _handle_config_modelo(chat_id, topic_id, actor_id, args, db, tg, services)
+    elif cmd == "/pdf_senha":
+        await _handle_pdf_senha(chat_id, topic_id, actor_id, args, db, tg)
+    elif cmd == "/pdf_senhas":
+        await _handle_pdf_senhas(chat_id, topic_id, db, tg)
+    elif cmd == "/pdf_senha_remove":
+        await _handle_pdf_senha_remove(chat_id, topic_id, actor_id, args, db, tg)
+    elif cmd == "/config_documentos":
+        await _start_config_documentos(chat_id, topic_id, actor_id, db, tg)
     elif cmd == "/help_config":
         await tg.send_text(chat_id, (
             "<b>Comandos de Configuração:</b>\n\n"
@@ -64,7 +74,12 @@ async def handle_command(message: dict, services: dict):
             "/config_modelo — Ver/trocar modelo de IA\n"
             "/config_modelo listar 20 — Listar 20 modelos por preço\n"
             "/custos — Relatório de custos API (7 dias)\n"
-            "/custos 30 — Relatório dos últimos 30 dias"
+            "/custos 30 — Relatório dos últimos 30 dias\n"
+            "\n<b>PDFs protegidos:</b>\n"
+            "/pdf_senha &lt;pattern&gt; &lt;senha&gt; — Cadastrar senha\n"
+            "/pdf_senhas — Listar senhas cadastradas\n"
+            "/pdf_senha_remove &lt;pattern&gt; — Remover senhas de um remetente\n"
+            "/config_documentos — CPF/CNPJ/nasc. (inferência de senha, opt-in)"
         ), thread_id=message.get("message_thread_id"))
 
 
@@ -371,6 +386,8 @@ async def handle_config_response(message: dict, pending: dict, services: dict):
         await _continue_config_identidade(chat_id, text, pending, state, db, tg, thread_id=thread_id)
     elif action_type == "config_playbook":
         await _continue_config_playbook(chat_id, text, pending, state, db, tg, thread_id=thread_id)
+    elif action_type == "config_documentos":
+        await _continue_config_documentos(chat_id, text, pending, state, db, tg, thread_id=thread_id)
 
 
 async def _continue_config_identidade(chat_id, text, pending, state, db, tg, thread_id=None):
@@ -451,4 +468,243 @@ async def _continue_config_playbook(chat_id, text, pending, state, db, tg, threa
             f"\u2705 <b>Playbook #{playbook_id} criado!</b>\n\n"
             f"\U0001f3af Gatilho: {state['trigger']}\n"
             f"\U0001f4dd Modo: {mode}"
+        ), thread_id=thread_id)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# PR 2: PDF password management
+# ──────────────────────────────────────────────────────────────────────────
+
+_MASKED_PWD = "••••••"
+
+
+def _format_datetime(dt) -> str:
+    if not dt:
+        return "nunca"
+    try:
+        return dt.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return str(dt)
+
+
+async def _handle_pdf_senha(chat_id, topic_id, actor_id, args, db, tg):
+    """/pdf_senha <pattern> <senha> — cadastra senha de PDF encriptada."""
+    thread_id = topic_id if topic_id != chat_id else None
+    account = await db.get_account_by_topic(topic_id)
+    if not account:
+        await tg.send_text(chat_id, "\u274c Conta não encontrada para este tópico.", thread_id=thread_id)
+        return
+
+    parts = args.strip().split(maxsplit=1) if args else []
+    if len(parts) < 2:
+        await tg.send_text(chat_id, (
+            "\U0001f511 <b>Cadastrar senha de PDF</b>\n\n"
+            "Uso: <code>/pdf_senha &lt;pattern&gt; &lt;senha&gt;</code>\n\n"
+            "Exemplos de pattern:\n"
+            "• <code>*@bradesco.com.br</code> — qualquer remetente do domínio\n"
+            "• <code>cobranca@empresa.com</code> — remetente literal\n\n"
+            "A senha é armazenada criptografada (Fernet)."
+        ), thread_id=thread_id)
+        return
+
+    pattern, senha = parts[0].strip(), parts[1].strip()
+    if not pattern or not senha:
+        await tg.send_text(chat_id, "\u274c Pattern e senha não podem ser vazios.", thread_id=thread_id)
+        return
+
+    try:
+        from orchestrator.utils.crypto import encrypt, is_configured
+    except Exception as e:
+        await tg.send_text(chat_id, f"\u274c Erro ao carregar módulo de criptografia: {e}", thread_id=thread_id)
+        return
+
+    if not is_configured():
+        await tg.send_text(chat_id, (
+            "\u274c <b>PDF_PASSWORD_KEY não configurada</b>\n\n"
+            "Gere uma chave Fernet e adicione ao <code>.env</code>:\n"
+            "<code>python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"</code>"
+        ), thread_id=thread_id)
+        return
+
+    try:
+        enc = encrypt(senha)
+    except Exception as e:
+        await tg.send_text(chat_id, f"\u274c Erro ao encriptar senha: {e}", thread_id=thread_id)
+        return
+
+    row_id = await db.add_pdf_password(account["id"], pattern, enc, label=None)
+    if row_id:
+        await tg.send_text(chat_id, (
+            f"\u2705 Senha cadastrada para <code>{pattern}</code>.\n"
+            f"A senha será tentada automaticamente nos próximos PDFs deste remetente."
+        ), thread_id=thread_id)
+    else:
+        await tg.send_text(chat_id, (
+            f"\u2139\ufe0f Senha para <code>{pattern}</code> já estava cadastrada."
+        ), thread_id=thread_id)
+
+
+async def _handle_pdf_senhas(chat_id, topic_id, db, tg):
+    """/pdf_senhas — lista senhas cadastradas (senha sempre mascarada)."""
+    thread_id = topic_id if topic_id != chat_id else None
+    account = await db.get_account_by_topic(topic_id)
+    if not account:
+        await tg.send_text(chat_id, "\u274c Conta não encontrada para este tópico.", thread_id=thread_id)
+        return
+    rows = await db.list_pdf_passwords(account["id"])
+    if not rows:
+        await tg.send_text(chat_id, (
+            "\U0001f511 Nenhuma senha de PDF cadastrada.\n"
+            "Use <code>/pdf_senha &lt;pattern&gt; &lt;senha&gt;</code>."
+        ), thread_id=thread_id)
+        return
+
+    lines = ["<b>\U0001f511 Senhas de PDF cadastradas:</b>\n"]
+    for r in rows:
+        label = f" — {r['label']}" if r.get("label") else ""
+        locked = ""
+        if r.get("locked_until"):
+            from datetime import datetime, timezone
+            if r["locked_until"] > datetime.now(timezone.utc):
+                locked = " \U0001f512 bloqueado"
+        lines.append(
+            f"• <code>{r['sender_pattern']}</code>{label} — senha: {_MASKED_PWD}\n"
+            f"   último uso: {_format_datetime(r.get('last_used_at'))} "
+            f"| usos: {r.get('use_count', 0)}{locked}"
+        )
+    await tg.send_text(chat_id, "\n".join(lines), thread_id=thread_id)
+
+
+async def _handle_pdf_senha_remove(chat_id, topic_id, actor_id, args, db, tg):
+    """/pdf_senha_remove <pattern> — remove todas as senhas de um pattern."""
+    thread_id = topic_id if topic_id != chat_id else None
+    pattern = (args or "").strip()
+    if not pattern:
+        await tg.send_text(chat_id, "Uso: <code>/pdf_senha_remove &lt;pattern&gt;</code>", thread_id=thread_id)
+        return
+    account = await db.get_account_by_topic(topic_id)
+    if not account:
+        await tg.send_text(chat_id, "\u274c Conta não encontrada para este tópico.", thread_id=thread_id)
+        return
+    removed = await db.remove_pdf_passwords(account["id"], pattern)
+    if removed:
+        await tg.send_text(chat_id, (
+            f"\u2705 {removed} senha(s) removida(s) para <code>{pattern}</code>."
+        ), thread_id=thread_id)
+    else:
+        await tg.send_text(chat_id, (
+            f"\u2139\ufe0f Nenhuma senha cadastrada para <code>{pattern}</code>."
+        ), thread_id=thread_id)
+
+
+async def _start_config_documentos(chat_id, topic_id, actor_id, db, tg):
+    """Conversational multi-step: CPF / CNPJ / data de nascimento."""
+    thread_id = topic_id if topic_id != chat_id else None
+    account = await db.get_account_by_topic(topic_id)
+    if not account:
+        await tg.send_text(chat_id, "\u274c Conta não encontrada para este tópico.", thread_id=thread_id)
+        return
+    try:
+        from orchestrator.utils.crypto import is_configured
+    except Exception as e:
+        await tg.send_text(chat_id, f"\u274c Módulo de criptografia indisponível: {e}", thread_id=thread_id)
+        return
+    if not is_configured():
+        await tg.send_text(chat_id, (
+            "\u274c <b>PDF_PASSWORD_KEY não configurada</b> — impossível armazenar documentos "
+            "com segurança. Configure a variável no .env e tente novamente."
+        ), thread_id=thread_id)
+        return
+
+    await db.create_pending_action(
+        account["id"], "config", "config_documentos", actor_id, chat_id, None,
+        {"step": "cpf"}, topic_id=topic_id,
+    )
+    await tg.send_text(chat_id, (
+        "\U0001f510 <b>Documentos pessoais</b>\n\n"
+        "Estes dados serão armazenados <b>criptografados</b> (Fernet) e usados "
+        "<u>exclusivamente</u> para tentar abrir PDFs protegidos por senha "
+        "quando o corpo do email indicar que a senha é o CPF/CNPJ/nascimento.\n\n"
+        "Envie o <b>CPF</b> (só números ou com pontos), ou <code>-</code> para pular."
+    ), thread_id=thread_id)
+
+
+async def _continue_config_documentos(chat_id, text, pending, state, db, tg, thread_id=None):
+    """Continue multi-step documentos flow. Accepts '-' to skip any step."""
+    import re as _re
+    from orchestrator.utils.crypto import encrypt
+
+    step = state.get("step")
+    val = (text or "").strip()
+
+    if step == "cpf":
+        if val != "-":
+            digits = _re.sub(r"\D", "", val)
+            if len(digits) != 11:
+                await tg.send_text(chat_id, (
+                    "\u274c CPF inválido (precisa ter 11 dígitos). Tente de novo ou envie <code>-</code> para pular."
+                ), thread_id=thread_id)
+                return
+            state["cpf"] = digits
+        state["step"] = "cnpj"
+        await db.update_pending_state(pending["id"], state)
+        await tg.send_text(chat_id, "Envie o <b>CNPJ</b> (14 dígitos) ou <code>-</code> para pular.", thread_id=thread_id)
+
+    elif step == "cnpj":
+        if val != "-":
+            digits = _re.sub(r"\D", "", val)
+            if len(digits) != 14:
+                await tg.send_text(chat_id, (
+                    "\u274c CNPJ inválido (precisa ter 14 dígitos). Tente de novo ou envie <code>-</code> para pular."
+                ), thread_id=thread_id)
+                return
+            state["cnpj"] = digits
+        state["step"] = "birthdate"
+        await db.update_pending_state(pending["id"], state)
+        await tg.send_text(chat_id, (
+            "Envie a <b>data de nascimento</b> no formato <code>DD/MM/AAAA</code> "
+            "ou <code>-</code> para pular."
+        ), thread_id=thread_id)
+
+    elif step == "birthdate":
+        if val != "-":
+            m = _re.match(r"^(\d{2})/(\d{2})/(\d{4})$", val)
+            if not m:
+                await tg.send_text(chat_id, (
+                    "\u274c Formato inválido. Use <code>DD/MM/AAAA</code> ou <code>-</code> para pular."
+                ), thread_id=thread_id)
+                return
+            dd, mm, yyyy = m.group(1), m.group(2), m.group(3)
+            state["birthdate"] = f"{yyyy}-{mm}-{dd}"
+        state["step"] = "confirm"
+        await db.update_pending_state(pending["id"], state)
+        resumo = []
+        resumo.append(f"CPF: {'***.***.***-' + state['cpf'][-2:] if state.get('cpf') else '—'}")
+        resumo.append(f"CNPJ: {'**.***.***/****-' + state['cnpj'][-2:] if state.get('cnpj') else '—'}")
+        resumo.append(f"Nascimento: {state.get('birthdate', '—')}")
+        await tg.send_text(chat_id, (
+            "Confirme os dados (serão criptografados antes de salvar):\n\n"
+            + "\n".join(resumo)
+            + "\n\nDigite <code>sim</code> para salvar ou <code>cancelar</code>."
+        ), thread_id=thread_id)
+
+    elif step == "confirm":
+        if val.lower() not in ("sim", "s", "yes", "y"):
+            await db.delete_pending_action(pending["id"])
+            await tg.send_text(chat_id, "\u274c Cancelado. Nenhum dado foi salvo.", thread_id=thread_id)
+            return
+        cpf_enc = encrypt(state["cpf"]) if state.get("cpf") else None
+        cnpj_enc = encrypt(state["cnpj"]) if state.get("cnpj") else None
+        bd_enc = encrypt(state["birthdate"]) if state.get("birthdate") else None
+        await db.upsert_account_documents(
+            account_id=pending.get("account_id"),
+            cpf_encrypted=cpf_enc,
+            cnpj_encrypted=cnpj_enc,
+            birthdate_encrypted=bd_enc,
+        )
+        await db.delete_pending_action(pending["id"])
+        await tg.send_text(chat_id, (
+            "\u2705 <b>Documentos salvos criptografados.</b>\n\n"
+            "Serão usados apenas para inferir senhas de PDFs quando o corpo do email "
+            "mencionar CPF/CNPJ/nascimento."
         ), thread_id=thread_id)
