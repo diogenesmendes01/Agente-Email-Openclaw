@@ -225,19 +225,18 @@ class TelegramService:
         
         # Ação necessária (só para critical/high)
         if urgencia_key in ["critical", "high"]:
-            acao_text = action.get("justificativa", "Verificar e tomar ação necessária.")
+            acao_text = action.get("acao_usuario") or action.get("justificativa") or "Verificar e tomar ação necessária."
             lines.append("")
             lines.append("⚠️ <b>AÇÃO NECESSÁRIA</b>")
-            lines.append(html.escape(acao_text[:300]))
-        
+            lines.append(html.escape(acao_text[:500]))
+
         # Rascunho (formato do guia - sem borda)
         if rascunho:
             lines.append("")
             lines.append("💬 <b>RASCUNHO PRONTO:</b>")
-            # Dividir rascunho em linhas
-            rascunho_lines = rascunho.split("\n")
-            for line in rascunho_lines[:20]:  # Limite de 20 linhas
-                lines.append(html.escape(line[:50]))
+            rascunho_truncado = rascunho if len(rascunho) <= 2000 else rascunho[:2000] + "\n…(rascunho continua — use Editar)"
+            for line in rascunho_truncado.split("\n"):
+                lines.append(html.escape(line))
         
         # Rodapé
         lines.append("")
