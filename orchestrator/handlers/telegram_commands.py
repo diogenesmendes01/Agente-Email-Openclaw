@@ -763,12 +763,18 @@ async def _start_config_prompt(chat_id, topic_id, actor_id, db, tg):
 async def _continue_config_prompt(chat_id, text, pending, state, db, tg, thread_id=None):
     """Multi-step wizard for per-account prompt config."""
     from orchestrator.services.prompt_builder import (
-        sanitize_user_freeform, MAX_FREEFORM_CHARS,
+        sanitize_user_freeform, MAX_FREEFORM_CHARS, validate_layer3_field,
     )
 
     step = state.get("step")
     val = (text or "").strip()
     account_id = pending.get("account_id")
+
+    reject_msg = (
+        "\u274c <b>Rejeitado</b>: texto contem palavras que podem burlar as "
+        "regras de sistema (ignore, override, desconsidere, etc.). Use uma "
+        "formulacao positiva: em vez de \"ignore X\" prefira \"evite mencionar X\"."
+    )
 
     if step == "menu":
         current = await db.get_account_prompt_config(account_id) or {}
@@ -777,14 +783,14 @@ async def _continue_config_prompt(chat_id, text, pending, state, db, tg, thread_
             await db.update_pending_state(pending["id"], state)
             cur = current.get("tom_adicional") or "(nao definido)"
             await tg.send_text(chat_id, (
-                f"<b>Tom adicional</b>\nAtual: <i>{cur}</i>\n\n"
+                f"<b>Tom adicional</b>\nAtual: <i>{_html_escape(str(cur))}</i>\n\n"
                 "Envie o novo tom ou <code>-</code> para limpar."
             ), thread_id=thread_id)
         elif val == "2":
             state["step"] = "set_extras"
             await db.update_pending_state(pending["id"], state)
             extras = current.get("instrucoes_extras") or []
-            cur = "\n".join(f"- {e}" for e in extras) if extras else "(nenhuma)"
+            cur = "\n".join(f"- {_html_escape(str(e))}" for e in extras) if extras else "(nenhuma)"
             await tg.send_text(chat_id, (
                 f"<b>Instrucoes extras</b>\nAtuais:\n{cur}\n\n"
                 "Envie uma instrucao por linha (ou <code>-</code> para limpar)."
@@ -793,7 +799,7 @@ async def _continue_config_prompt(chat_id, text, pending, state, db, tg, thread_
             state["step"] = "set_cats"
             await db.update_pending_state(pending["id"], state)
             cats = current.get("categorias_extras") or []
-            cur = ", ".join(cats) if cats else "(nenhuma)"
+            cur = _html_escape(", ".join(cats)) if cats else "(nenhuma)"
             await tg.send_text(chat_id, (
                 f"<b>Categorias extras</b>\nAtuais: {cur}\n\n"
                 "Envie as categorias separadas por virgula (ou <code>-</code> para limpar)."
@@ -803,7 +809,7 @@ async def _continue_config_prompt(chat_id, text, pending, state, db, tg, thread_
             await db.update_pending_state(pending["id"], state)
             cur = current.get("tamanho_rascunho") or "(padrao: medio)"
             await tg.send_text(chat_id, (
-                f"<b>Tamanho do rascunho</b>\nAtual: {cur}\n\n"
+                f"<b>Tamanho do rascunho</b>\nAtual: {_html_escape(str(cur))}\n\n"
                 "Envie <code>curto</code>, <code>medio</code> ou <code>longo</code> "
                 "(ou <code>-</code> para limpar)."
             ), thread_id=thread_id)
@@ -813,7 +819,7 @@ async def _continue_config_prompt(chat_id, text, pending, state, db, tg, thread_
             cur = current.get("instrucoes_livres") or "(nada)"
             await tg.send_text(chat_id, (
                 f"<b>Instrucoes livres</b> (max {MAX_FREEFORM_CHARS} chars)\n"
-                f"Atual: <i>{cur[:200]}</i>\n\n"
+                f"Atual: <i>{_html_escape(str(cur)[:200])}</i>\n\n"
                 "Envie o texto, ou <code>-</code> para limpar.\n"
                 "Palavras como <i>ignore / override / desconsidere</i> serao rejeitadas."
             ), thread_id=thread_id)
@@ -827,7 +833,15 @@ async def _continue_config_prompt(chat_id, text, pending, state, db, tg, thread_
         return
 
     if step == "set_tom":
-        new_val = None if val == "-" else val
+        if val == "-":
+            new_val = None
+        else:
+            ok, clean, _w = validate_layer3_field("tom_adicional", val)
+            if not ok:
+                await db.delete_pending_action(pending["id"])
+                await tg.send_text(chat_id, reject_msg, thread_id=thread_id)
+                return
+            new_val = clean
         await db.update_account_prompt_config_field(account_id, "tom_adicional", new_val)
         await db.delete_pending_action(pending["id"])
         await tg.send_text(chat_id, "\u2705 Tom atualizado.", thread_id=thread_id)
@@ -837,18 +851,28 @@ async def _continue_config_prompt(chat_id, text, pending, state, db, tg, thread_
             lst = []
         else:
             lst = [ln.strip().lstrip("-").strip() for ln in val.splitlines() if ln.strip()]
-        await db.update_account_prompt_config_field(account_id, "instrucoes_extras", lst)
+        ok, clean_list, _w = validate_layer3_field("instrucoes_extras", lst)
+        if not ok:
+            await db.delete_pending_action(pending["id"])
+            await tg.send_text(chat_id, reject_msg, thread_id=thread_id)
+            return
+        await db.update_account_prompt_config_field(account_id, "instrucoes_extras", clean_list)
         await db.delete_pending_action(pending["id"])
-        await tg.send_text(chat_id, f"\u2705 Instrucoes atualizadas ({len(lst)} itens).", thread_id=thread_id)
+        await tg.send_text(chat_id, f"\u2705 Instrucoes atualizadas ({len(clean_list)} itens).", thread_id=thread_id)
 
     elif step == "set_cats":
         if val == "-":
             cats = []
         else:
             cats = [c.strip() for c in val.split(",") if c.strip()]
-        await db.update_account_prompt_config_field(account_id, "categorias_extras", cats)
+        ok, clean_cats, _w = validate_layer3_field("categorias_extras", cats)
+        if not ok:
+            await db.delete_pending_action(pending["id"])
+            await tg.send_text(chat_id, reject_msg, thread_id=thread_id)
+            return
+        await db.update_account_prompt_config_field(account_id, "categorias_extras", clean_cats)
         await db.delete_pending_action(pending["id"])
-        await tg.send_text(chat_id, f"\u2705 Categorias extras atualizadas ({len(cats)} itens).", thread_id=thread_id)
+        await tg.send_text(chat_id, f"\u2705 Categorias extras atualizadas ({len(clean_cats)} itens).", thread_id=thread_id)
 
     elif step == "set_tamanho":
         if val == "-":
@@ -911,19 +935,19 @@ async def _show_prompt_ver(chat_id, topic_id, db, tg):
     if cfg:
         lines.append("<b>[CAMADA 3 — Sua configuracao]</b>")
         if cfg.get("tom_adicional"):
-            lines.append(f"\u2022 Tom adicional: {cfg['tom_adicional']}")
+            lines.append(f"\u2022 Tom adicional: {_html_escape(str(cfg['tom_adicional']))}")
         ie = cfg.get("instrucoes_extras") or []
         if ie:
             lines.append(f"\u2022 Instrucoes extras: ({len(ie)} itens)")
             for it in ie[:5]:
-                lines.append(f"   - {it}")
+                lines.append(f"   - {_html_escape(str(it))}")
         ce = cfg.get("categorias_extras") or []
         if ce:
-            lines.append(f"\u2022 Categorias extras: {', '.join(ce)}")
+            lines.append(f"\u2022 Categorias extras: {_html_escape(', '.join(str(c) for c in ce))}")
         if cfg.get("tamanho_rascunho"):
-            lines.append(f"\u2022 Tamanho do rascunho: {cfg['tamanho_rascunho']}")
+            lines.append(f"\u2022 Tamanho do rascunho: {_html_escape(str(cfg['tamanho_rascunho']))}")
         if cfg.get("instrucoes_livres"):
-            lines.append(f"\u2022 Instrucoes livres: <i>{cfg['instrucoes_livres'][:160]}</i>")
+            lines.append(f"\u2022 Instrucoes livres: <i>{_html_escape(str(cfg['instrucoes_livres'])[:160])}</i>")
     else:
         lines.append("<b>[CAMADA 3 — Sua configuracao]</b>")
         lines.append("(nenhuma — usando defaults)")

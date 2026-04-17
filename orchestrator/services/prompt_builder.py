@@ -28,8 +28,11 @@ prompt construction that wants the full 3-layer composition from scratch.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -141,6 +144,24 @@ BLOCKED_PATTERNS: Tuple[str, ...] = (
 
 MAX_FREEFORM_CHARS = 500
 
+# Per-field character limits for Layer 3. Freeform allows longer prose;
+# tom/extras/categorias are short labels.
+LAYER3_FIELD_LIMITS: Dict[str, int] = {
+    "tom_adicional": 200,
+    "instrucoes_extras_item": 200,
+    "categorias_extras_item": 50,
+    "instrucoes_livres": MAX_FREEFORM_CHARS,
+}
+
+
+def _has_blocked_pattern(s: str) -> List[str]:
+    """Return list of pattern strings that matched (empty = clean)."""
+    hits: List[str] = []
+    for pat in BLOCKED_PATTERNS:
+        if re.search(pat, s, flags=re.IGNORECASE):
+            hits.append(pat)
+    return hits
+
 
 def sanitize_user_freeform(
     text: str,
@@ -171,20 +192,181 @@ def sanitize_user_freeform(
     return s, []
 
 
+def validate_layer3_field(
+    field_name: str,
+    value: Any,
+) -> Tuple[bool, Any, List[str]]:
+    """Validate and sanitize a single Layer 3 field.
+
+    Returns ``(ok, clean_value, warnings)``.
+
+    * ``tom_adicional``: string, max 200 chars, BLOCKED_PATTERNS rejected.
+    * ``instrucoes_extras``: list of strings; each item max 200 chars and
+      filtered. Any offending item fails the whole field.
+    * ``categorias_extras``: list of strings; each item max 50 chars and
+      filtered (user cannot nickname a category "override rules").
+    * ``instrucoes_livres``: string, max 500 chars, BLOCKED_PATTERNS rejected.
+    * ``tamanho_rascunho``: string, one of {curto, medio, longo}.
+
+    On rejection, ``clean_value`` is ``""`` for strings / ``[]`` for lists
+    and ``warnings`` is non-empty. On success, ``clean_value`` holds the
+    (possibly truncated) sanitized value.
+    """
+    if field_name == "tom_adicional":
+        if value is None:
+            return True, None, []
+        if not isinstance(value, str):
+            return False, "", [f"{field_name}: not a string"]
+        s = value.strip()
+        if not s:
+            return True, None, []
+        hits = _has_blocked_pattern(s)
+        if hits:
+            return False, "", [f"{field_name}: blocked pattern(s) {hits}"]
+        limit = LAYER3_FIELD_LIMITS["tom_adicional"]
+        if len(s) > limit:
+            s = s[:limit].rstrip() + "…"
+        return True, s, []
+
+    if field_name == "instrucoes_extras":
+        if value is None:
+            return True, [], []
+        if not isinstance(value, list):
+            return False, [], [f"{field_name}: not a list"]
+        cleaned: List[str] = []
+        warnings: List[str] = []
+        limit = LAYER3_FIELD_LIMITS["instrucoes_extras_item"]
+        for idx, item in enumerate(value):
+            if not isinstance(item, str):
+                warnings.append(f"{field_name}[{idx}]: not a string")
+                continue
+            s = item.strip()
+            if not s:
+                continue
+            hits = _has_blocked_pattern(s)
+            if hits:
+                warnings.append(f"{field_name}[{idx}]: blocked pattern(s) {hits}")
+                continue
+            if len(s) > limit:
+                s = s[:limit].rstrip() + "…"
+            cleaned.append(s)
+        if warnings:
+            return False, [], warnings
+        return True, cleaned, []
+
+    if field_name == "categorias_extras":
+        if value is None:
+            return True, [], []
+        if not isinstance(value, list):
+            return False, [], [f"{field_name}: not a list"]
+        cleaned = []
+        warnings = []
+        limit = LAYER3_FIELD_LIMITS["categorias_extras_item"]
+        for idx, item in enumerate(value):
+            if not isinstance(item, str):
+                warnings.append(f"{field_name}[{idx}]: not a string")
+                continue
+            s = item.strip()
+            if not s:
+                continue
+            hits = _has_blocked_pattern(s)
+            if hits:
+                warnings.append(f"{field_name}[{idx}]: blocked pattern(s) {hits}")
+                continue
+            if len(s) > limit:
+                s = s[:limit].rstrip()
+            cleaned.append(s)
+        if warnings:
+            return False, [], warnings
+        return True, cleaned, []
+
+    if field_name == "instrucoes_livres":
+        if value is None:
+            return True, None, []
+        if not isinstance(value, str):
+            return False, "", [f"{field_name}: not a string"]
+        clean, hits = sanitize_user_freeform(value)
+        if hits:
+            return False, "", [f"{field_name}: blocked pattern(s) {hits}"]
+        return True, clean or None, []
+
+    if field_name == "tamanho_rascunho":
+        if value is None:
+            return True, None, []
+        if not isinstance(value, str):
+            return False, "", [f"{field_name}: not a string"]
+        s = value.strip().lower().replace("é", "e")
+        if s == "":
+            return True, None, []
+        if s not in ("curto", "medio", "longo"):
+            return False, "", [f"{field_name}: invalid value"]
+        return True, s, []
+
+    # Unknown field → pass-through (do not block unrelated keys)
+    return True, value, []
+
+
+def validate_layer3_config(
+    config: Optional[Dict[str, Any]],
+) -> Tuple[bool, Dict[str, Any], Dict[str, List[str]]]:
+    """Validate the whole Layer 3 config dict.
+
+    Returns ``(ok, cleaned_config, warnings_per_field)``. ``ok`` is False
+    if ANY field failed — in that case ``cleaned_config`` is the subset
+    of successfully validated fields (for defense-in-depth rendering).
+    """
+    if not config or not isinstance(config, dict):
+        return True, {}, {}
+
+    cleaned: Dict[str, Any] = {}
+    all_warnings: Dict[str, List[str]] = {}
+    for field in (
+        "tom_adicional", "instrucoes_extras", "categorias_extras",
+        "tamanho_rascunho", "instrucoes_livres",
+    ):
+        if field not in config:
+            continue
+        ok, clean_val, warnings = validate_layer3_field(field, config[field])
+        if ok:
+            if clean_val not in (None, "", []):
+                cleaned[field] = clean_val
+        else:
+            all_warnings[field] = warnings
+
+    # Preserve unknown keys unchanged (non-interpolated metadata).
+    for k, v in config.items():
+        if k in {"tom_adicional", "instrucoes_extras", "categorias_extras",
+                 "tamanho_rascunho", "instrucoes_livres"}:
+            continue
+        cleaned[k] = v
+
+    return (len(all_warnings) == 0), cleaned, all_warnings
+
+
 def layer3_text(custom: Optional[Dict[str, Any]]) -> str:
     """Render the per-account config block, or '' if no meaningful config."""
     if not custom or not isinstance(custom, dict):
         return ""
 
-    tom = (custom.get("tom_adicional") or "").strip()
-    extras_list = custom.get("instrucoes_extras") or []
+    # Defense in depth: even if something bypassed the save-time validation
+    # (direct DB write, migration, bug) we re-validate at render time and
+    # DROP any offending field rather than emitting it into the prompt.
+    _ok, cleaned, warnings_per_field = validate_layer3_config(custom)
+    if warnings_per_field:
+        logger.warning(
+            "layer3_text: dropping invalid Layer 3 field(s) at render time: %s",
+            warnings_per_field,
+        )
+
+    tom = (cleaned.get("tom_adicional") or "").strip() if isinstance(cleaned.get("tom_adicional"), str) else ""
+    extras_list = cleaned.get("instrucoes_extras") or []
     if not isinstance(extras_list, list):
         extras_list = []
-    cats_extras = custom.get("categorias_extras") or []
+    cats_extras = cleaned.get("categorias_extras") or []
     if not isinstance(cats_extras, list):
         cats_extras = []
-    tamanho = (custom.get("tamanho_rascunho") or "").strip()
-    livres = (custom.get("instrucoes_livres") or "").strip()
+    tamanho = (cleaned.get("tamanho_rascunho") or "").strip() if isinstance(cleaned.get("tamanho_rascunho"), str) else ""
+    livres = (cleaned.get("instrucoes_livres") or "").strip() if isinstance(cleaned.get("instrucoes_livres"), str) else ""
 
     if not any([tom, extras_list, cats_extras, tamanho, livres]):
         return ""
