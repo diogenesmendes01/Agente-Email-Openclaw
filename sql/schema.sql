@@ -234,3 +234,15 @@ CREATE TABLE IF NOT EXISTS llm_quality_log (
 
 CREATE INDEX IF NOT EXISTS idx_llm_quality_log_account_kind
     ON llm_quality_log(account_id, kind, created_at DESC);
+
+-- PR 3: per-account prompt customization (Layer 3 of 3-layer prompt architecture)
+
+CREATE TABLE IF NOT EXISTS account_prompt_config (
+    account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_prompt_config_updated
+    ON account_prompt_config(updated_at DESC);
