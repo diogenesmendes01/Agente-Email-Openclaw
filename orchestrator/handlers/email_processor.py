@@ -212,8 +212,14 @@ class EmailProcessor:
                     logger.warning(f"[{email_id}] Erro ao buscar learned rules: {e}")
 
             # 4. Classificar
+            # Metadata is returned per-call so concurrent emails don't collide
+            # on shared state in the LLMService singleton.
+            validation_metas: Dict[str, Any] = {}
             logger.info(f"[{email_id}] Classificando...")
-            classification = await self.llm.classify_email(email, context, model_override=model_override)
+            classification, classification_meta = await self.llm.classify_email(
+                email, context, model_override=model_override
+            )
+            validation_metas["classification"] = classification_meta
             result["classification"] = classification
             
             # 4.5. Check playbooks (if configured)
@@ -254,12 +260,18 @@ class EmailProcessor:
 
             # 5. Resumir
             logger.info(f"[{email_id}] Resumindo...")
-            summary = await self.llm.summarize_email(email, classification, context, model_override=model_override)
+            summary, summary_meta = await self.llm.summarize_email(
+                email, classification, context, model_override=model_override
+            )
+            validation_metas["summary"] = summary_meta
             result["summary"] = summary
-            
+
             # 6. Decidir ação
             logger.info(f"[{email_id}] Decidindo ação...")
-            action = await self.llm.decide_action(email, classification, summary, config, context, model_override=model_override)
+            action, action_meta = await self.llm.decide_action(
+                email, classification, summary, config, context, model_override=model_override
+            )
+            validation_metas["action"] = action_meta
             result["action"] = action
             
             # 7. Persistir decisão
@@ -362,6 +374,33 @@ class EmailProcessor:
                         await self.db.update_learning_counter(account_id, self._emails_processed)
                 except Exception as e:
                     logger.error(f"[{email_id}] Erro no learning engine: {e}")
+
+            # Log LLM quality (validation telemetry) — best-effort, non-blocking.
+            # Metadata is read from the per-email `validation_metas` dict, NOT
+            # from shared state on the LLMService singleton — that prevents
+            # concurrent emails from stomping each other's telemetry.
+            try:
+                for kind, meta in validation_metas.items():
+                    if meta is None:
+                        continue
+                    await self.db.log_llm_quality(
+                        account_id=account_id,
+                        email_id=email_id,
+                        kind=kind,
+                        model=meta.model,
+                        retries=meta.retries,
+                        flags=meta.flags,
+                        json_parse_failed=meta.json_parse_failed,
+                        schema_valid=meta.schema_valid,
+                        fallback_used=meta.fallback_used,
+                        prompt_tokens_successful=meta.prompt_tokens_successful,
+                        completion_tokens_successful=meta.completion_tokens_successful,
+                        prompt_tokens_total=meta.prompt_tokens_total,
+                        completion_tokens_total=meta.completion_tokens_total,
+                        cost_total_usd=meta.cost_total_usd,
+                    )
+            except Exception as qe:
+                logger.warning(f"[{email_id}] llm_quality_log error: {qe}")
 
             # Record metrics
             if self.metrics and account_id:

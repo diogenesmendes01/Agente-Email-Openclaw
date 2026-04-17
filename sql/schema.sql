@@ -181,3 +181,29 @@ CREATE TABLE IF NOT EXISTS playbooks (
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     CONSTRAINT idx_playbooks_company_trigger UNIQUE(company_id, trigger_description)
 );
+
+CREATE TABLE IF NOT EXISTS llm_quality_log (
+    id SERIAL PRIMARY KEY,
+    account_id INT REFERENCES accounts(id) ON DELETE SET NULL,
+    email_message_id TEXT,
+    kind TEXT NOT NULL,
+    model TEXT,
+    retries INT DEFAULT 0,
+    flags TEXT[],
+    json_parse_failed BOOLEAN DEFAULT FALSE,
+    schema_valid BOOLEAN DEFAULT TRUE,
+    fallback_used BOOLEAN DEFAULT FALSE,
+    -- Totals (sum of all attempts including retries):
+    prompt_tokens INT,
+    completion_tokens INT,
+    -- Granular fields for retry-cost visibility:
+    prompt_tokens_successful INT,
+    completion_tokens_successful INT,
+    prompt_tokens_total INT,
+    completion_tokens_total INT,
+    cost_total_usd NUMERIC(10, 6),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_quality_log_account_kind
+    ON llm_quality_log(account_id, kind, created_at DESC);

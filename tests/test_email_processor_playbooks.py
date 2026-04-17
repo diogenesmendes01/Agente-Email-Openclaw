@@ -2,6 +2,12 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from orchestrator.services.llm_validator import ValidationMetadata
+
+
+def _meta(kind: str) -> ValidationMetadata:
+    return ValidationMetadata(kind=kind)
+
 
 @pytest.fixture
 def processor():
@@ -28,9 +34,9 @@ async def test_playbook_match_auto_respond(processor):
     }
     processor.db.get_account.return_value = {"id": 1}
     processor.db.get_account_config.return_value = {"vips": [], "telegram_topic": 11}
-    processor.llm.classify_email.return_value = {"prioridade": "Média", "importante": True, "confianca": 0.8, "categoria": "financeiro"}
-    processor.llm.summarize_email.return_value = {"resumo": "Cliente pede segunda via de boleto"}
-    processor.llm.decide_action.return_value = {"acao": "notificar", "account": "u@t.com"}
+    processor.llm.classify_email.return_value = ({"prioridade": "Média", "importante": True, "confianca": 0.8, "categoria": "financeiro"}, _meta("classification"))
+    processor.llm.summarize_email.return_value = ({"resumo": "Cliente pede segunda via de boleto"}, _meta("summary"))
+    processor.llm.decide_action.return_value = ({"acao": "notificar", "account": "u@t.com"}, _meta("action"))
 
     # Playbook matches
     processor.playbook_service.match.return_value = {
@@ -63,9 +69,9 @@ async def test_playbook_no_match_normal_flow(processor):
     }
     processor.db.get_account.return_value = {"id": 1}
     processor.db.get_account_config.return_value = {"vips": [], "telegram_topic": 11}
-    processor.llm.classify_email.return_value = {"prioridade": "Baixa", "importante": True, "confianca": 0.7, "categoria": "outro"}
-    processor.llm.summarize_email.return_value = {"resumo": "Greeting"}
-    processor.llm.decide_action.return_value = {"acao": "notificar", "account": "u@t.com"}
+    processor.llm.classify_email.return_value = ({"prioridade": "Baixa", "importante": True, "confianca": 0.7, "categoria": "outro"}, _meta("classification"))
+    processor.llm.summarize_email.return_value = ({"resumo": "Greeting"}, _meta("summary"))
+    processor.llm.decide_action.return_value = ({"acao": "notificar", "account": "u@t.com"}, _meta("action"))
     processor.playbook_service.match.return_value = None
     processor.telegram.send_email_notification.return_value = 100
     processor.db.log_decision.return_value = 1
