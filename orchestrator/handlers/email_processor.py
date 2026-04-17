@@ -101,18 +101,11 @@ class EmailProcessor:
                 email = raw_email  # Já parseado pelo GOGService
             email["body_clean"] = self.cleaner.clean(email.get("body", ""))
 
-            # Extract PDF attachment text
+            # Extract PDF attachments — robust: digital / escaneado / protegido / corrompido.
+            # Rule: if we could not read it, we MUST NOT inject fabricated content.
+            email["pdf_attachments"] = []
             if self.pdf_reader:
-                for attachment in email.get("attachments", []):
-                    if attachment.get("mimeType") == "application/pdf":
-                        logger.info(f"[{email_id}] Extracting PDF: {attachment['filename']}")
-                        pdf_bytes = await self.gmail.get_attachment(
-                            email_id, attachment["attachmentId"], account
-                        )
-                        if pdf_bytes:
-                            pdf_text = await self.pdf_reader.extract(pdf_bytes)
-                            if pdf_text:
-                                email["body_clean"] += f"\n\n--- ANEXO PDF: {attachment['filename']} ---\n{pdf_text}"
+                await self._process_pdf_attachments(email_id, email, account)
 
             # 2.5. Buscar contexto da thread se houver
             thread_id = email.get("threadId")
@@ -476,3 +469,135 @@ class EmailProcessor:
                 logger.info(f"Rascunho criado: {draft}")
         
         # "notificar" não precisa de ação adicional (já vai para Telegram)
+
+    async def _process_pdf_attachments(
+        self, email_id: str, email: Dict[str, Any], account: str,
+    ):
+        """Extract each PDF attachment using the robust reader.
+
+        Appends successful extractions to ``body_clean`` and flags unread PDFs
+        with a very explicit marker so the LLM never hallucinates content
+        from the filename alone.
+        """
+        from orchestrator.utils.pdf_reader import extract_pdf_attachment
+        from orchestrator.utils import pdf_ratelimit
+        from orchestrator.utils.crypto import decrypt, is_configured as crypto_configured
+
+        email.setdefault("pdf_attachments", [])
+        attachments = [a for a in email.get("attachments", []) if a.get("mimeType") == "application/pdf"]
+        if not attachments:
+            return
+
+        # Resolve account_id & sender for per-account password lookup
+        account_data = await self.db.get_account(account)
+        account_id = account_data["id"] if account_data else None
+        sender_email = (email.get("from_email") or email.get("from") or "").lower()
+        body_for_hints = email.get("body_clean", "") or ""
+
+        # Prefetch cadastradas passwords (decrypted) and inferred candidates.
+        cadastradas: list = []
+        inferred: list = []
+        if account_id and crypto_configured():
+            try:
+                rows = await self.db.get_pdf_passwords_for_sender(account_id, sender_email)
+                for r in rows:
+                    pattern = r["sender_pattern"]
+                    # Skip DB-level lockouts and in-memory rate-limit lockouts
+                    if r.get("locked_until"):
+                        from datetime import datetime, timezone
+                        if r["locked_until"] > datetime.now(timezone.utc):
+                            continue
+                    if pdf_ratelimit.is_locked(account_id, pattern):
+                        continue
+                    pwd = decrypt(r["password_encrypted"])
+                    if pwd:
+                        cadastradas.append({"id": r["id"], "password": pwd, "pattern": pattern})
+            except Exception as e:
+                logger.warning(f"[{email_id}] Failed to fetch pdf_passwords: {e}")
+
+            try:
+                from orchestrator.utils.pdf_reader import _inferred_passwords_from_body
+                docs_row = await self.db.get_account_documents(account_id)
+                if docs_row:
+                    docs_plain = {
+                        "cpf": decrypt(docs_row.get("cpf_encrypted")) if docs_row.get("cpf_encrypted") else None,
+                        "cnpj": decrypt(docs_row.get("cnpj_encrypted")) if docs_row.get("cnpj_encrypted") else None,
+                        "birthdate": decrypt(docs_row.get("birthdate_encrypted")) if docs_row.get("birthdate_encrypted") else None,
+                    }
+                    inferred = _inferred_passwords_from_body(body_for_hints, docs_plain)
+            except Exception as e:
+                logger.warning(f"[{email_id}] Failed to build inferred passwords: {e}")
+
+        for attachment in attachments:
+            filename = attachment.get("filename", "arquivo.pdf")
+            logger.info(f"[{email_id}] Processing PDF: {filename}")
+            pdf_bytes = await self.gmail.get_attachment(
+                email_id, attachment["attachmentId"], account,
+            )
+            if not pdf_bytes:
+                email["pdf_attachments"].append({
+                    "filename": filename, "leitura_sucesso": False,
+                    "motivo_falha": "download_falhou", "tipo": None,
+                })
+                email["body_clean"] += (
+                    f"\n\n--- ANEXO PDF NÃO LIDO: {filename} "
+                    f"(MOTIVO: falha ao baixar o anexo do Gmail) ---"
+                )
+                continue
+
+            try:
+                result = await extract_pdf_attachment(
+                    pdf_bytes, filename,
+                    reader=self.pdf_reader,
+                    passwords_cadastradas=cadastradas,
+                    inferred_candidates=inferred,
+                )
+            except Exception as e:
+                logger.error(f"[{email_id}] extract_pdf_attachment crashed: {e}", exc_info=True)
+                result = {
+                    "filename": filename, "tipo": "corrompido",
+                    "texto": None, "campos": {}, "leitura_sucesso": False,
+                    "motivo_falha": "corrompido", "senha_usada_hash": None,
+                }
+
+            email["pdf_attachments"].append(result)
+
+            if result["leitura_sucesso"] and result.get("texto"):
+                email["body_clean"] += (
+                    f"\n\n--- ANEXO PDF: {filename} (tipo: {result['tipo']}) ---\n"
+                    f"{result['texto']}"
+                )
+                # Update usage counter for cadastrada password hit
+                if result.get("matched_password_id"):
+                    try:
+                        await self.db.touch_pdf_password(result["matched_password_id"])
+                    except Exception:
+                        pass
+                # Reset rate-limit counters on success
+                if account_id:
+                    for c in cadastradas:
+                        pdf_ratelimit.record_success(account_id, c["pattern"])
+            else:
+                motivo = result.get("motivo_falha") or "desconhecido"
+                motivo_human = {
+                    "senha_ausente": "protegido por senha — nenhuma senha cadastrada foi capaz de abrir",
+                    "senha_incorreta": "protegido por senha — as senhas cadastradas não funcionaram",
+                    "ocr_falhou": "escaneado — OCR não extraiu texto",
+                    "corrompido": "arquivo corrompido ou formato inválido",
+                    "download_falhou": "falha ao baixar o anexo do Gmail",
+                }.get(motivo, motivo)
+                email["body_clean"] += (
+                    f"\n\n--- ANEXO PDF NÃO LIDO: {filename} "
+                    f"(MOTIVO: {motivo_human}) ---"
+                )
+                # Rate-limit: count failure against the best-matching cadastrada pattern
+                if account_id and result.get("tipo") == "protegido" and cadastradas:
+                    for c in cadastradas:
+                        activated = pdf_ratelimit.record_failure(account_id, c["pattern"])
+                        if activated:
+                            try:
+                                await self.db.lock_pdf_pattern(
+                                    account_id, c["pattern"], minutes=30,
+                                )
+                            except Exception:
+                                pass

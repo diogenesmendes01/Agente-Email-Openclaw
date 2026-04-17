@@ -460,6 +460,137 @@ class DatabaseService:
             logger.warning(f"log_llm_quality failed: {e}")
             return None
 
+    # ── PDF Passwords ──
+
+    async def add_pdf_password(
+        self, account_id: int, sender_pattern: str,
+        password_encrypted: str, label: Optional[str] = None,
+    ) -> Optional[int]:
+        """Insert a new PDF password. Returns the row id, or None if already exists."""
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval(
+                """INSERT INTO pdf_passwords
+                   (account_id, sender_pattern, password_encrypted, label)
+                   VALUES ($1, $2, $3, $4)
+                   ON CONFLICT (account_id, sender_pattern, password_encrypted)
+                   DO NOTHING
+                   RETURNING id""",
+                account_id, sender_pattern, password_encrypted, label,
+            )
+
+    async def list_pdf_passwords(self, account_id: int) -> List[Dict]:
+        """List all passwords for an account (ordered by last_used desc)."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT id, sender_pattern, label, last_used_at, use_count,
+                          locked_until, created_at
+                   FROM pdf_passwords
+                   WHERE account_id = $1
+                   ORDER BY COALESCE(last_used_at, created_at) DESC""",
+                account_id,
+            )
+            return [dict(r) for r in rows]
+
+    async def get_pdf_passwords_for_sender(
+        self, account_id: int, sender_email: str,
+    ) -> List[Dict]:
+        """Return all encrypted passwords whose sender_pattern matches sender_email.
+
+        Matching is performed in Python via fnmatch, since patterns are small and
+        filtering at the DB level would require regex on every row.
+        """
+        import fnmatch
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT id, sender_pattern, password_encrypted, last_used_at,
+                          use_count, locked_until
+                   FROM pdf_passwords
+                   WHERE account_id = $1
+                   ORDER BY COALESCE(last_used_at, created_at) DESC""",
+                account_id,
+            )
+        matched = []
+        sender_lower = (sender_email or "").lower()
+        for r in rows:
+            pat = (r["sender_pattern"] or "").lower()
+            if fnmatch.fnmatch(sender_lower, pat):
+                matched.append(dict(r))
+        return matched
+
+    async def touch_pdf_password(self, password_id: int):
+        """Update last_used_at and increment use_count."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE pdf_passwords
+                   SET last_used_at = NOW(), use_count = use_count + 1
+                   WHERE id = $1""",
+                password_id,
+            )
+
+    async def remove_pdf_passwords(
+        self, account_id: int, sender_pattern: str,
+    ) -> int:
+        """Remove all passwords for a given pattern. Returns count removed."""
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """DELETE FROM pdf_passwords
+                   WHERE account_id = $1 AND sender_pattern = $2""",
+                account_id, sender_pattern,
+            )
+            try:
+                return int(result.split()[-1])
+            except (ValueError, IndexError):
+                return 0
+
+    async def lock_pdf_pattern(
+        self, account_id: int, sender_pattern: str, minutes: int,
+    ):
+        """Set locked_until = NOW() + interval on all passwords for this pattern."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                f"""UPDATE pdf_passwords
+                    SET locked_until = NOW() + INTERVAL '{int(minutes)} minutes'
+                    WHERE account_id = $1 AND sender_pattern = $2""",
+                account_id, sender_pattern,
+            )
+
+    # ── Account Documents (CPF/CNPJ/Birthdate for password inference) ──
+
+    async def upsert_account_documents(
+        self, account_id: int,
+        cpf_encrypted: Optional[str] = None,
+        cnpj_encrypted: Optional[str] = None,
+        birthdate_encrypted: Optional[str] = None,
+    ):
+        """Create/update opt-in account documents used for PDF password inference."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO account_documents
+                    (account_id, cpf_encrypted, cnpj_encrypted, birthdate_encrypted)
+                   VALUES ($1, $2, $3, $4)
+                   ON CONFLICT (account_id) DO UPDATE SET
+                       cpf_encrypted = COALESCE(EXCLUDED.cpf_encrypted, account_documents.cpf_encrypted),
+                       cnpj_encrypted = COALESCE(EXCLUDED.cnpj_encrypted, account_documents.cnpj_encrypted),
+                       birthdate_encrypted = COALESCE(EXCLUDED.birthdate_encrypted, account_documents.birthdate_encrypted),
+                       updated_at = NOW()""",
+                account_id, cpf_encrypted, cnpj_encrypted, birthdate_encrypted,
+            )
+
+    async def get_account_documents(self, account_id: int) -> Optional[Dict]:
+        """Return encrypted documents row for an account, if exists."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM account_documents WHERE account_id = $1",
+                account_id,
+            )
+            return dict(row) if row else None
+
+    async def delete_account_documents(self, account_id: int):
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM account_documents WHERE account_id = $1", account_id,
+            )
+
     # ── Account by Topic ──
 
     async def get_account_by_topic(self, topic_id):
