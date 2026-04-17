@@ -173,6 +173,14 @@ class EmailProcessor:
                                 ]
                 except Exception as e:
                     logger.warning(f"[{email_id}] Error fetching company profile/domain rules: {e}")
+
+                # Per-account prompt customization (Layer 3)
+                try:
+                    apc = await self.db.get_account_prompt_config(account_id)
+                    if isinstance(apc, dict) and apc:
+                        context["account_prompt_config"] = apc
+                except Exception as e:
+                    logger.warning(f"[{email_id}] Error fetching account_prompt_config: {e}")
             
             # Buscar emails similares (se Qdrant disponível)
             if self.qdrant.is_connected():

@@ -591,6 +591,65 @@ class DatabaseService:
                 "DELETE FROM account_documents WHERE account_id = $1", account_id,
             )
 
+    # ── Account Prompt Config (Layer 3 of the 3-layer prompt architecture) ──
+
+    async def get_account_prompt_config(self, account_id: int) -> Optional[Dict]:
+        """Return the per-account prompt config dict, or None if not set."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT config FROM account_prompt_config WHERE account_id = $1",
+                account_id,
+            )
+            if not row:
+                return None
+            cfg = row["config"]
+            # asyncpg returns JSONB as str by default unless codec is set — handle both.
+            if isinstance(cfg, str):
+                try:
+                    cfg = json.loads(cfg)
+                except (ValueError, TypeError):
+                    return None
+            return cfg if isinstance(cfg, dict) else None
+
+    async def set_account_prompt_config(self, account_id: int, config: Dict) -> None:
+        """Upsert the entire config dict for an account."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO account_prompt_config (account_id, config)
+                   VALUES ($1, $2::jsonb)
+                   ON CONFLICT (account_id) DO UPDATE SET
+                       config = EXCLUDED.config,
+                       updated_at = NOW()""",
+                account_id, json.dumps(config or {}),
+            )
+
+    async def update_account_prompt_config_field(
+        self, account_id: int, field: str, value: Any,
+    ) -> None:
+        """Upsert a single field inside the JSONB config."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO account_prompt_config (account_id, config)
+                   VALUES ($1, jsonb_build_object($2::text, $3::jsonb))
+                   ON CONFLICT (account_id) DO UPDATE SET
+                       config = jsonb_set(
+                           COALESCE(account_prompt_config.config, '{}'::jsonb),
+                           ARRAY[$2::text],
+                           $3::jsonb,
+                           true
+                       ),
+                       updated_at = NOW()""",
+                account_id, field, json.dumps(value),
+            )
+
+    async def delete_account_prompt_config(self, account_id: int) -> None:
+        """Remove the per-account custom config (reverts to defaults)."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM account_prompt_config WHERE account_id = $1",
+                account_id,
+            )
+
     # ── Account by Topic ──
 
     async def get_account_by_topic(self, topic_id):

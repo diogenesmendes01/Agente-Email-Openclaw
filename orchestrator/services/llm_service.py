@@ -12,12 +12,19 @@ from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from orchestrator.services.llm_validator import validate_and_retry, ValidationMetadata
+from orchestrator.services.prompt_builder import PromptBuilder
 
 logger = logging.getLogger(__name__)
 
 
 class LLMService:
     """Serviço para interagir com LLM via OpenRouter e OpenAI"""
+
+    # Class-level default; instance-level __init__ overrides with a fresh one.
+    # Keeping it at class level ensures tests that construct via
+    # ``LLMService.__new__(LLMService)`` (bypassing __init__) still have a
+    # usable ``prompt_builder`` attribute.
+    prompt_builder = PromptBuilder()
 
     def __init__(self, model_registry=None):
         self.openrouter_key = os.getenv("OPENROUTER_API_KEY")
@@ -29,6 +36,7 @@ class LLMService:
         self.embedding_model = "text-embedding-3-small"
 
         self.model_registry = model_registry
+        self.prompt_builder = PromptBuilder()
 
         self.openai_client = None
         if self.openai_key:
@@ -450,8 +458,10 @@ Responda em JSON:
     }}
 }}"""
 
-        return self._manage_prompt_size(prompt)
-    
+        custom = context.get("account_prompt_config") if isinstance(context, dict) else None
+        wrapped = self.prompt_builder.wrap("classification", prompt, custom)
+        return self._manage_prompt_size(wrapped)
+
     def _build_summarizer_prompt(self, email: Dict, classification: Dict, context: Dict = None) -> str:
         """Constrói prompt de resumo com contexto da empresa"""
         context = context or {}
@@ -471,7 +481,9 @@ Corpo: {(email.get("body_clean") or email.get("body", ""))[:1500]}
 Responda em JSON:
 {{"resumo": "resumo em 1-2 frases", "entidades": {{"cliente": ""}}, "sentimento": "neutro"}}"""
 
-        return self._manage_prompt_size(prompt)
+        custom = (context or {}).get("account_prompt_config") if isinstance(context, dict) else None
+        wrapped = self.prompt_builder.wrap("summary", prompt, custom)
+        return self._manage_prompt_size(wrapped)
     
     def _build_action_prompt(
         self, email: Dict, classification: Dict, summary: Dict,
@@ -565,8 +577,10 @@ Responda em JSON:
     "rascunho_resposta": "texto do rascunho sempre que nao for spam/newsletter"
 }}"""
 
-        return self._manage_prompt_size(prompt)
-    
+        custom = (context or {}).get("account_prompt_config") if isinstance(context, dict) else None
+        wrapped = self.prompt_builder.wrap("action", prompt, custom)
+        return self._manage_prompt_size(wrapped)
+
     def _parse_classification(self, response: str) -> Dict[str, Any]:
         """Parse da resposta de classificação"""
         try:
