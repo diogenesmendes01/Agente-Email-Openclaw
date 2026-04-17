@@ -5,7 +5,7 @@ Email Processor - Orquestra o processamento de emails
 import os
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from orchestrator.services.database_service import DatabaseService
@@ -80,7 +80,7 @@ class EmailProcessor:
             "email_id": email_id,
             "account": account,
             "status": "processing",
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
         
         try:
@@ -153,7 +153,7 @@ class EmailProcessor:
             if account_id:
                 try:
                     company_profile = await self.db.get_company_profile(account_id)
-                    if company_profile:
+                    if isinstance(company_profile, dict) and company_profile:
                         # Map DB field names to what LLM prompts expect
                         context["company_profile"] = {
                             "nome": company_profile.get("company_name", ""),
@@ -164,17 +164,20 @@ class EmailProcessor:
                             "whatsapp_url": company_profile.get("whatsapp_url", ""),
                         }
                         # Domain rules need company_id from the profile
-                        domain_rules_raw = await self.db.get_domain_rules(company_profile["id"])
-                        if domain_rules_raw:
-                            context["domain_rules"] = [
-                                {
-                                    "dominio": r.get("domain", ""),
-                                    "categoria": r.get("category", ""),
-                                    "prioridade_minima": r.get("min_priority", ""),
-                                    "acao_padrao": r.get("default_action", ""),
-                                }
-                                for r in domain_rules_raw
-                            ]
+                        company_id = company_profile.get("id")
+                        if company_id is not None:
+                            domain_rules_raw = await self.db.get_domain_rules(company_id)
+                            if isinstance(domain_rules_raw, list) and domain_rules_raw:
+                                context["domain_rules"] = [
+                                    {
+                                        "dominio": r.get("domain", ""),
+                                        "categoria": r.get("category", ""),
+                                        "prioridade_minima": r.get("min_priority", ""),
+                                        "acao_padrao": r.get("default_action", ""),
+                                    }
+                                    for r in domain_rules_raw
+                                    if isinstance(r, dict)
+                                ]
                 except Exception as e:
                     logger.warning(f"[{email_id}] Error fetching company profile/domain rules: {e}")
             
@@ -340,7 +343,11 @@ class EmailProcessor:
             # Lazy-load counter from database on first successful email
             if not self._counter_loaded and account_id:
                 try:
-                    self._emails_processed = await self.db.get_learning_counter(account_id)
+                    counter_value = await self.db.get_learning_counter(account_id)
+                    if isinstance(counter_value, int) and counter_value >= 0:
+                        self._emails_processed = counter_value
+                    else:
+                        self._emails_processed = 0
                     self._counter_loaded = True
                 except Exception:
                     pass
