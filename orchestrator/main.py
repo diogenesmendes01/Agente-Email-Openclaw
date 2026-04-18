@@ -70,7 +70,7 @@ from orchestrator.services.job_queue import JobQueue
 from orchestrator.handlers.telegram_callbacks import handle_callback, handle_text_message
 from orchestrator.services.playbook_service import PlaybookService
 from orchestrator.services.model_registry import ModelRegistry
-from orchestrator.utils.bg_tasks import fire_and_forget, bg_tasks, drain as drain_bg_tasks
+from orchestrator.utils.bg_tasks import fire_and_forget, drain as drain_bg_tasks
 
 # Serviços que não precisam de init async ficam no nível de módulo
 qdrant = QdrantService()
