@@ -196,6 +196,21 @@ async def lifespan(app_instance):
         await cleanup_task
     except asyncio.CancelledError:
         pass
+
+    # Wait for any in-flight webhook background tasks to complete (5s budget)
+    if _bg_tasks:
+        logger.info(f"Waiting for {len(_bg_tasks)} webhook tasks to finish...")
+        try:
+            await asyncio.wait(_bg_tasks, timeout=5.0)
+        except Exception as e:
+            logger.warning(f"Error waiting for bg tasks: {e}")
+
+    # Close the shared Telegram HTTP client
+    try:
+        await telegram.aclose()
+    except Exception as e:
+        logger.warning(f"Error closing telegram client: {e}")
+
     await pool.close()
     logger.info("Email Agent shutdown — pool closed")
 
