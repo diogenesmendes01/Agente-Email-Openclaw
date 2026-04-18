@@ -13,7 +13,7 @@ from orchestrator.services.qdrant_service import QdrantService
 from orchestrator.services.llm_service import LLMService
 from orchestrator.services.gmail_service import GmailService
 from orchestrator.services.telegram_service import TelegramService
-from orchestrator.utils.email_parser import EmailParser
+from orchestrator.utils.email_parser import EmailParser, emails_match
 from orchestrator.utils.text_cleaner import TextCleaner
 from orchestrator.utils.pdf_reader import PdfReader
 from orchestrator.services.learning_engine import LearningEngine
@@ -120,11 +120,13 @@ class EmailProcessor:
                     logger.info(f"[{email_id}] Thread com {len(thread_emails)} mensagens")
 
                     # Verifica se a última mensagem da thread foi enviada pelo dono (você)
-                    # Se sim, a thread já foi respondida e não precisa gerar rascunho
+                    # Se sim, a thread já foi respondida e não precisa gerar rascunho.
+                    # Usa parsing RFC-5322 (não substring) para evitar falso-positivo em
+                    # emails tipo "admin@x.com" vs "admin@xavier.com".
                     last_msg = thread_emails[-1] if thread_emails else None
                     if last_msg:
-                        last_from = (last_msg.get("from_email") or last_msg.get("from") or "").lower()
-                        if account.lower() in last_from:
+                        last_from = last_msg.get("from_email") or last_msg.get("from") or ""
+                        if emails_match(last_from, account):
                             owner_already_replied = True
                             logger.info(
                                 f"[{email_id}] Ultima mensagem da thread eh do dono "
