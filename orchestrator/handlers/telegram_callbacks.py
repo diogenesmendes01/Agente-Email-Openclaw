@@ -1,5 +1,4 @@
 """Telegram callback router — dispatches callbacks to action modules."""
-import asyncio
 import json
 import logging
 import re
@@ -7,6 +6,7 @@ from datetime import datetime
 
 from orchestrator.actions import archive, vip, silence, spam, task
 from orchestrator.actions import feedback, reply
+from orchestrator.utils.bg_tasks import fire_and_forget
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +140,7 @@ async def handle_callback(callback_query: dict, services: dict):
     allowed = services.get("allowed_user_ids", set())
     if allowed and actor_id not in allowed:
         logger.warning(f"Unauthorized callback from user {actor_id}")
-        asyncio.create_task(tg.answer_callback(callback_id, "⛔ Acesso não autorizado"))
+        fire_and_forget(tg.answer_callback(callback_id, "⛔ Acesso não autorizado"))
         return
 
     parts = callback_data.split(":")
@@ -152,7 +152,7 @@ async def handle_callback(callback_query: dict, services: dict):
     if action == "set_urgency":
         new_urgency = parts[1] if len(parts) > 1 else "medium"
         email_id = parts[2] if len(parts) > 2 else ""
-        asyncio.create_task(tg.answer_callback(callback_id, f"✅ {new_urgency.upper()}"))
+        fire_and_forget(tg.answer_callback(callback_id, f"✅ {new_urgency.upper()}"))
         pending = await db.get_pending_action(email_id, "reclassify", actor_id=actor_id, topic_id=topic_id)
         if pending:
             ctx = _build_ctx(email_id, "", actor_id, chat_id, message_id, text, services, pending=pending, topic_id=topic_id)
@@ -175,7 +175,7 @@ async def handle_callback(callback_query: dict, services: dict):
     # --- CANCEL RECLASSIFY ---
     if action == "cancel_reclassify":
         email_id = parts[1] if len(parts) > 1 else ""
-        asyncio.create_task(tg.answer_callback(callback_id, "❌ Cancelado"))
+        fire_and_forget(tg.answer_callback(callback_id, "❌ Cancelado"))
         pending = await db.get_pending_action(email_id, "reclassify", actor_id=actor_id, topic_id=topic_id)
         if pending:
             state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
@@ -189,7 +189,7 @@ async def handle_callback(callback_query: dict, services: dict):
     # --- CANCEL CUSTOM REPLY ---
     if action == "cancel_custom_reply":
         email_id = parts[1] if len(parts) > 1 else ""
-        asyncio.create_task(tg.answer_callback(callback_id, "❌ Cancelado"))
+        fire_and_forget(tg.answer_callback(callback_id, "❌ Cancelado"))
         pending = await db.get_pending_action(email_id, "custom_reply", actor_id=actor_id, topic_id=topic_id)
         if pending:
             await db.delete_pending_action(pending["id"])
@@ -199,7 +199,7 @@ async def handle_callback(callback_query: dict, services: dict):
     # --- SEND CUSTOM DRAFT ---
     if action == "send_custom_draft":
         email_id = parts[1] if len(parts) > 1 else ""
-        asyncio.create_task(tg.answer_callback(callback_id, "✉️ Enviando..."))
+        fire_and_forget(tg.answer_callback(callback_id, "✉️ Enviando..."))
         pending = await db.get_pending_action(email_id, "custom_reply", actor_id=actor_id, topic_id=topic_id)
         if pending:
             state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
@@ -218,7 +218,7 @@ async def handle_callback(callback_query: dict, services: dict):
     # --- ADJUST CUSTOM DRAFT ---
     if action == "adjust_custom_draft":
         email_id = parts[1] if len(parts) > 1 else ""
-        asyncio.create_task(tg.answer_callback(callback_id, "✏️ Digite nova instrução"))
+        fire_and_forget(tg.answer_callback(callback_id, "✏️ Digite nova instrução"))
         pending = await db.get_pending_action(email_id, "custom_reply", actor_id=actor_id, topic_id=topic_id)
         if pending:
             state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
@@ -234,7 +234,7 @@ async def handle_callback(callback_query: dict, services: dict):
     # --- CONFIRM actions (second step) ---
     if action.startswith("confirm_"):
         real_action = action.replace("confirm_", "")
-        asyncio.create_task(tg.answer_callback(callback_id, "✅ Executando..."))
+        fire_and_forget(tg.answer_callback(callback_id, "✅ Executando..."))
         pending = await db.get_pending_action(email_id, real_action, actor_id=actor_id, topic_id=topic_id)
         if not pending:
             return
@@ -260,7 +260,7 @@ async def handle_callback(callback_query: dict, services: dict):
     # --- CANCEL actions (second step) ---
     if action.startswith("cancel_"):
         real_action = action.replace("cancel_", "")
-        asyncio.create_task(tg.answer_callback(callback_id, "❌ Cancelado"))
+        fire_and_forget(tg.answer_callback(callback_id, "❌ Cancelado"))
         pending = await db.get_pending_action(email_id, real_action, actor_id=actor_id, topic_id=topic_id)
         if pending:
             state = json.loads(pending["state"]) if isinstance(pending["state"], str) else pending["state"]
@@ -274,7 +274,7 @@ async def handle_callback(callback_query: dict, services: dict):
 
     # --- RECLASSIFY (first step) ---
     if action == "reclassify":
-        asyncio.create_task(tg.answer_callback(callback_id, "🔄 Selecione a urgência"))
+        fire_and_forget(tg.answer_callback(callback_id, "🔄 Selecione a urgência"))
         account_data = await db.get_account(account)
         ctx = _build_ctx(email_id, account, actor_id, chat_id, message_id, text, services, topic_id=topic_id)
         if account_data:
@@ -284,7 +284,7 @@ async def handle_callback(callback_query: dict, services: dict):
 
     # --- CUSTOM REPLY (first step) ---
     if action == "custom_reply":
-        asyncio.create_task(tg.answer_callback(callback_id, "💬 Aguardando instrução"))
+        fire_and_forget(tg.answer_callback(callback_id, "💬 Aguardando instrução"))
         account_data = await db.get_account(account)
         ctx = _build_ctx(email_id, account, actor_id, chat_id, message_id, text, services, topic_id=topic_id)
         if account_data:
@@ -294,7 +294,7 @@ async def handle_callback(callback_query: dict, services: dict):
 
     # --- CREATE TASK (first step — prompts for details) ---
     if action == "create_task":
-        asyncio.create_task(tg.answer_callback(callback_id, "📝 Descreva a tarefa"))
+        fire_and_forget(tg.answer_callback(callback_id, "📝 Descreva a tarefa"))
         account_data = await db.get_account(account)
         keyboard = {"inline_keyboard": [[
             {"text": "❌ Cancelar", "callback_data": f"cancel_create_task:{email_id}"}
@@ -319,7 +319,7 @@ async def handle_callback(callback_query: dict, services: dict):
 
     # --- CANCEL CREATE TASK ---
     if action == "cancel_create_task":
-        asyncio.create_task(tg.answer_callback(callback_id, "❌ Cancelado"))
+        fire_and_forget(tg.answer_callback(callback_id, "❌ Cancelado"))
         pending = await db.get_pending_action(email_id, "create_task", actor_id=actor_id, topic_id=topic_id)
         if pending:
             await db.delete_pending_action(pending["id"])
@@ -328,7 +328,7 @@ async def handle_callback(callback_query: dict, services: dict):
 
     # --- ACTIONS REQUIRING CONFIRMATION (first step) ---
     if action in CONFIRM_ACTIONS:
-        asyncio.create_task(tg.answer_callback(callback_id, "⚠️ Confirme a ação"))
+        fire_and_forget(tg.answer_callback(callback_id, "⚠️ Confirme a ação"))
         sender = _extract_sender(text)
         account_data = await db.get_account(account)
         acct_id = account_data["id"] if account_data else None
@@ -345,7 +345,7 @@ async def handle_callback(callback_query: dict, services: dict):
         return
 
     # --- UNKNOWN ---
-    asyncio.create_task(tg.answer_callback(callback_id, f"Ação desconhecida: {action}"))
+    fire_and_forget(tg.answer_callback(callback_id, f"Ação desconhecida: {action}"))
     logger.warning(f"Unknown callback action: {action}")
 
 

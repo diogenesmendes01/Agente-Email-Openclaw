@@ -70,6 +70,7 @@ from orchestrator.services.job_queue import JobQueue
 from orchestrator.handlers.telegram_callbacks import handle_callback, handle_text_message
 from orchestrator.services.playbook_service import PlaybookService
 from orchestrator.services.model_registry import ModelRegistry
+from orchestrator.utils.bg_tasks import fire_and_forget, bg_tasks
 
 # Serviços que não precisam de init async ficam no nível de módulo
 qdrant = QdrantService()
@@ -198,10 +199,10 @@ async def lifespan(app_instance):
         pass
 
     # Wait for any in-flight webhook background tasks to complete (5s budget)
-    if _bg_tasks:
-        logger.info(f"Waiting for {len(_bg_tasks)} webhook tasks to finish...")
+    if bg_tasks:
+        logger.info(f"Waiting for {len(bg_tasks)} webhook tasks to finish...")
         try:
-            await asyncio.wait(_bg_tasks, timeout=5.0)
+            await asyncio.wait(bg_tasks, timeout=5.0)
         except Exception as e:
             logger.warning(f"Error waiting for bg tasks: {e}")
 
@@ -369,30 +370,6 @@ async def gmail_webhook(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Background tasks spawned from webhooks. Strong ref prevents GC-before-finish
-# (known CPython bug with unreferenced asyncio.Tasks).
-_bg_tasks: set = set()
-
-
-def _log_task_result(task):
-    """Log exceptions from fire-and-forget tasks; never re-raise."""
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc:
-        logger.error(f"Background webhook task failed: {exc}", exc_info=exc)
-
-
-def _fire_and_forget(coro):
-    """Schedule coroutine in background; webhook returns 200 immediately."""
-    import asyncio
-    task = asyncio.create_task(coro)
-    _bg_tasks.add(task)
-    task.add_done_callback(_log_task_result)
-    task.add_done_callback(_bg_tasks.discard)
-    return task
-
-
 @app.post("/telegram/callback")
 @limiter.limit("60/minute")
 async def telegram_callback(request: Request):
@@ -420,12 +397,12 @@ async def telegram_callback(request: Request):
 
         callback_query = body.get("callback_query")
         if callback_query:
-            _fire_and_forget(handle_callback(callback_query, services))
+            fire_and_forget(handle_callback(callback_query, services))
             return JSONResponse(status_code=200, content={"status": "ok"})
 
         message = body.get("message")
         if message and message.get("text"):
-            _fire_and_forget(handle_text_message(message, services))
+            fire_and_forget(handle_text_message(message, services))
             return JSONResponse(status_code=200, content={"status": "ok"})
 
         return JSONResponse(status_code=200, content={"status": "ignored"})
