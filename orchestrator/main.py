@@ -70,7 +70,7 @@ from orchestrator.services.job_queue import JobQueue
 from orchestrator.handlers.telegram_callbacks import handle_callback, handle_text_message
 from orchestrator.services.playbook_service import PlaybookService
 from orchestrator.services.model_registry import ModelRegistry
-from orchestrator.utils.bg_tasks import fire_and_forget, bg_tasks
+from orchestrator.utils.bg_tasks import fire_and_forget, bg_tasks, drain as drain_bg_tasks
 
 # Serviços que não precisam de init async ficam no nível de módulo
 qdrant = QdrantService()
@@ -198,37 +198,9 @@ async def lifespan(app_instance):
     except asyncio.CancelledError:
         pass
 
-    # Drain in-flight webhook background tasks.
-    # Loop in case a task spawns child tasks (e.g. handle_callback dispatching
-    # fire_and_forget(answer_callback)) mid-drain: each iteration snapshots the
-    # current bg_tasks and waits up to the remaining budget. Total budget: 5s.
-    if bg_tasks:
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + 5.0
-        while bg_tasks:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                break
-            snapshot = set(bg_tasks)
-            logger.info(
-                f"Waiting for {len(snapshot)} webhook task(s) "
-                f"({remaining:.1f}s left)..."
-            )
-            try:
-                await asyncio.wait(snapshot, timeout=remaining)
-            except Exception as e:
-                logger.warning(f"Error waiting for bg tasks: {e}")
-                break
-        # Anything still in bg_tasks after the budget: cancel deterministically.
-        if bg_tasks:
-            pending = set(bg_tasks)
-            logger.warning(
-                f"Cancelling {len(pending)} bg task(s) after drain timeout"
-            )
-            for task in pending:
-                task.cancel()
-            # Swallow CancelledError + any late exception (we're shutting down).
-            await asyncio.gather(*pending, return_exceptions=True)
+    # Drain in-flight webhook background tasks (5s budget, then cancel).
+    # See orchestrator/utils/bg_tasks.drain for semantics.
+    await drain_bg_tasks(timeout=5.0)
 
     # Close the shared Telegram HTTP client
     try:

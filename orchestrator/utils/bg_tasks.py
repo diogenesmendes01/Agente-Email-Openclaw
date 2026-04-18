@@ -35,3 +35,42 @@ def fire_and_forget(coro) -> asyncio.Task:
     task.add_done_callback(_log_task_result)
     task.add_done_callback(bg_tasks.discard)
     return task
+
+
+async def drain(timeout: float, task_set: set | None = None) -> None:
+    """Wait for background tasks to finish, cancelling any that exceed the budget.
+
+    Loops over fresh snapshots of `task_set` (default: module-level `bg_tasks`)
+    so tasks spawned mid-drain (e.g. a handler dispatching another
+    `fire_and_forget(...)` while being awaited) still get waited on, as long as
+    the total timeout budget allows. Anything still in the set after the
+    deadline is cancelled and gathered with `return_exceptions=True`.
+    """
+    target = task_set if task_set is not None else bg_tasks
+    if not target:
+        return
+
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    while target:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        snapshot = set(target)
+        logger.info(
+            f"Waiting for {len(snapshot)} bg task(s) ({remaining:.1f}s left)..."
+        )
+        try:
+            await asyncio.wait(snapshot, timeout=remaining)
+        except Exception as e:
+            logger.warning(f"Error waiting for bg tasks: {e}")
+            break
+
+    if target:
+        pending = set(target)
+        logger.warning(
+            f"Cancelling {len(pending)} bg task(s) after drain timeout"
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
