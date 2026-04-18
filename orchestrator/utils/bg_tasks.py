@@ -45,6 +45,10 @@ async def drain(timeout: float, task_set: set | None = None) -> None:
     `fire_and_forget(...)` while being awaited) still get waited on, as long as
     the total timeout budget allows. Anything still in the set after the
     deadline is cancelled and gathered with `return_exceptions=True`.
+
+    Finished tasks are removed from `task_set` on each iteration. Works both
+    with the module-level `bg_tasks` (which auto-discards via done-callback)
+    and with caller-supplied sets that have no such callback.
     """
     target = task_set if task_set is not None else bg_tasks
     if not target:
@@ -61,9 +65,16 @@ async def drain(timeout: float, task_set: set | None = None) -> None:
             f"Waiting for {len(snapshot)} bg task(s) ({remaining:.1f}s left)..."
         )
         try:
-            await asyncio.wait(snapshot, timeout=remaining)
+            done, _pending = await asyncio.wait(snapshot, timeout=remaining)
         except Exception as e:
             logger.warning(f"Error waiting for bg tasks: {e}")
+            break
+        # Remove finished tasks from the target. Idempotent with fire_and_forget's
+        # discard callback, but also correct for caller-supplied sets.
+        target.difference_update(done)
+        # No tasks completed in this window → wait timed out. Break to avoid
+        # spinning on the same still-running set.
+        if not done:
             break
 
     if target:
