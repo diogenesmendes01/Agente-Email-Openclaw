@@ -121,7 +121,7 @@ class TelegramService:
             "chat_id": self.chat_id,
             "text": text,
             "parse_mode": "HTML",
-            "disable_web_page_preview": True
+            "disable_web_page_preview": True,
         }
         if topic_id:
             payload["message_thread_id"] = topic_id
@@ -129,25 +129,21 @@ class TelegramService:
             payload["reply_markup"] = reply_markup
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/sendMessage", json=payload
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    msg_id = data.get("result", {}).get("message_id")
-                    logger.info(f"Notificação enviada: message_id={msg_id}")
-                    return msg_id
-                else:
-                    logger.error(f"Erro Telegram: {response.status_code} - {response.text}")
-                    raise httpx.HTTPStatusError(
-                        f"Telegram API error: {response.status_code}",
-                        request=response.request, response=response,
-                    )
+            response = await self._client.post("/sendMessage", json=payload)
+            if response.status_code == 200:
+                data = response.json()
+                msg_id = data.get("result", {}).get("message_id")
+                logger.info(f"Notificação enviada: message_id={msg_id}")
+                return msg_id
+            logger.error(f"Erro Telegram: {response.status_code} - {response.text}")
+            raise httpx.HTTPStatusError(
+                f"Telegram API error: {response.status_code}",
+                request=response.request, response=response,
+            )
         except (httpx.TimeoutException, httpx.ConnectError):
-            raise  # let tenacity retry
+            raise
         except httpx.HTTPStatusError:
-            raise  # let tenacity retry
+            raise
         except Exception as e:
             logger.error(f"Erro ao enviar: {e}")
             raise
@@ -346,20 +342,15 @@ class TelegramService:
             "chat_id": chat_id,
             "message_thread_id": thread_id,
             "text": text,
-            "parse_mode": "HTML"
+            "parse_mode": "HTML",
         }
-        
         if buttons:
             payload["reply_markup"] = {"inline_keyboard": buttons}
-        
+
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/sendMessage",
-                    json=payload
-                )
-                if response.status_code == 200:
-                    return response.json().get("result", {}).get("message_id")
+            response = await self._client.post("/sendMessage", json=payload)
+            if response.status_code == 200:
+                return response.json().get("result", {}).get("message_id")
         except Exception as e:
             logger.error(f"Erro ao enviar confirmação: {e}")
         return None
@@ -521,12 +512,9 @@ class TelegramService:
         if reply_markup:
             payload["reply_markup"] = reply_markup
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/sendMessage", json=payload
-                )
-                if response.status_code == 200:
-                    return response.json().get("result", {}).get("message_id")
+            response = await self._client.post("/sendMessage", json=payload)
+            if response.status_code == 200:
+                return response.json().get("result", {}).get("message_id")
         except Exception as e:
             logger.error(f"Error sending text: {e}")
         return None

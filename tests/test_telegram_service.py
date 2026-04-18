@@ -149,13 +149,15 @@ def test_rascunho_truncation_2000_chars(tg_service):
 
 @pytest.mark.asyncio
 async def test_send_text(tg_service):
+    """send_text uses the singleton client, returns message_id on success."""
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {"result": {"message_id": 42}}
-    with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.post.return_value = mock_resp
-        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        result = await tg_service.send_text(100, "Hello!")
-        assert result == 42
+    tg_service._client.post = AsyncMock(return_value=mock_resp)
+
+    result = await tg_service.send_text(100, "Hello!")
+
+    assert result == 42
+    tg_service._client.post.assert_called_once()
+    call_url = tg_service._client.post.call_args[0][0]
+    assert "sendMessage" in call_url
