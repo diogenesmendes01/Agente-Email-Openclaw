@@ -185,3 +185,29 @@ async def test_flag_ignores_current_email_when_it_is_owners(processor):
 
     ctx = _extract_context(processor.llm.classify_email.call_args)
     assert ctx.get("owner_already_replied") is False
+
+
+@pytest.mark.asyncio
+async def test_current_email_not_duplicated_in_thread_context(processor):
+    """thread_context passed to the LLM must NOT include the email being
+    processed — otherwise its body appears twice (once in HISTORICO DA
+    THREAD and again in EMAIL ATUAL)."""
+    account = "me@domain.com"
+    processor.gmail.get_email.return_value = _email(email_id="em3")
+    processor.gmail.get_thread.return_value = [
+        {"id": "em1", "from": "other@x.com", "from_email": "other@x.com", "body": "msg1", "date": "d1"},
+        {"id": "em2", "from": "me@domain.com", "from_email": "me@domain.com", "body": "msg2", "date": "d2"},
+        {"id": "em3", "from": "other@x.com", "from_email": "other@x.com", "body": "msg3-CURRENT", "date": "d3"},
+    ]
+
+    await processor.process_email("em3", account)
+
+    ctx = _extract_context(processor.llm.classify_email.call_args)
+    thread_context = ctx.get("thread_context", [])
+    ids_in_context = [m.get("id") for m in thread_context]
+    assert "em3" not in ids_in_context, (
+        f"Current email 'em3' must not appear in thread_context, got: {ids_in_context}"
+    )
+    # Prior messages should still be present
+    assert "em1" in ids_in_context
+    assert "em2" in ids_in_context

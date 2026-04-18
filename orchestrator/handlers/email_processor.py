@@ -115,18 +115,23 @@ class EmailProcessor:
                 logger.info(f"[{email_id}] Buscando contexto da thread {thread_id}...")
                 thread_emails = await self.gmail.get_thread(thread_id, account)
                 if thread_emails:
-                    # Pegar últimos emails da thread como contexto
-                    thread_context = thread_emails[-5:]  # Últimos 5 emails
-                    logger.info(f"[{email_id}] Thread com {len(thread_emails)} mensagens")
+                    # Remove o email atual da thread para nao duplicar conteudo
+                    # (ele ja aparece no bloco EMAIL ATUAL dos prompts).
+                    prior_msgs = [m for m in thread_emails if m.get("id") != email_id]
 
-                    # Verifica se o dono ja respondeu em ALGUM momento da thread
-                    # (ignorando o email atual). Cobre tambem o caso:
+                    # Contexto = ultimas 5 mensagens *anteriores* ao email atual.
+                    thread_context = prior_msgs[-5:]
+                    logger.info(
+                        f"[{email_id}] Thread com {len(thread_emails)} mensagens "
+                        f"({len(prior_msgs)} anteriores ao email atual)"
+                    )
+
+                    # Verifica se o dono ja respondeu em ALGUM momento da thread.
+                    # Cobre tambem o caso:
                     #   cliente -> dono (responde) -> cliente (nova msg)
                     # onde a ultima msg nao eh do dono mas a thread esta em andamento.
                     # Usa parsing RFC-5322 (nao substring) para evitar falso-positivo.
-                    for msg in thread_emails:
-                        if msg.get("id") == email_id:
-                            continue  # ignora o email atual
+                    for msg in prior_msgs:
                         sender = msg.get("from_email") or msg.get("from") or ""
                         if emails_match(sender, account):
                             owner_already_replied = True
