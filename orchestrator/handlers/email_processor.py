@@ -110,13 +110,26 @@ class EmailProcessor:
             # 2.5. Buscar contexto da thread se houver
             thread_id = email.get("threadId")
             thread_context = []
+            owner_already_replied = False
             if thread_id and thread_id != email_id:
                 logger.info(f"[{email_id}] Buscando contexto da thread {thread_id}...")
                 thread_emails = await self.gmail.get_thread(thread_id, account)
                 if thread_emails:
                     # Pegar últimos emails da thread como contexto
-                    thread_context = thread_emails[-3:]  # Últimos 3 emails
+                    thread_context = thread_emails[-5:]  # Últimos 5 emails
                     logger.info(f"[{email_id}] Thread com {len(thread_emails)} mensagens")
+
+                    # Verifica se a última mensagem da thread foi enviada pelo dono (você)
+                    # Se sim, a thread já foi respondida e não precisa gerar rascunho
+                    last_msg = thread_emails[-1] if thread_emails else None
+                    if last_msg:
+                        last_from = (last_msg.get("from_email") or last_msg.get("from") or "").lower()
+                        if account.lower() in last_from:
+                            owner_already_replied = True
+                            logger.info(
+                                f"[{email_id}] Ultima mensagem da thread eh do dono "
+                                f"({account}), thread ja respondida."
+                            )
             
             # 3. Buscar contexto
             logger.info(f"[{email_id}] Buscando contexto...")
@@ -140,6 +153,7 @@ class EmailProcessor:
                 "thread_context": thread_context,  # Emails anteriores da thread
                 "owner_name": owner_name,
                 "owner_email": account,
+                "owner_already_replied": owner_already_replied,
             }
 
             # Fetch company profile and domain rules for LLM context
