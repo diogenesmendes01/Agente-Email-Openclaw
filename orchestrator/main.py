@@ -199,23 +199,35 @@ async def lifespan(app_instance):
         pass
 
     # Drain in-flight webhook background tasks.
-    # Wait up to 5s for voluntary completion; cancel anything still pending
-    # so it doesn't try to use the closed HTTP client / DB pool afterward.
+    # Loop in case a task spawns child tasks (e.g. handle_callback dispatching
+    # fire_and_forget(answer_callback)) mid-drain: each iteration snapshots the
+    # current bg_tasks and waits up to the remaining budget. Total budget: 5s.
     if bg_tasks:
-        logger.info(f"Waiting for {len(bg_tasks)} webhook tasks to finish...")
-        try:
-            done, pending = await asyncio.wait(bg_tasks, timeout=5.0)
-        except Exception as e:
-            logger.warning(f"Error waiting for bg tasks: {e}")
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + 5.0
+        while bg_tasks:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            snapshot = set(bg_tasks)
+            logger.info(
+                f"Waiting for {len(snapshot)} webhook task(s) "
+                f"({remaining:.1f}s left)..."
+            )
+            try:
+                await asyncio.wait(snapshot, timeout=remaining)
+            except Exception as e:
+                logger.warning(f"Error waiting for bg tasks: {e}")
+                break
+        # Anything still in bg_tasks after the budget: cancel deterministically.
+        if bg_tasks:
             pending = set(bg_tasks)
-        if pending:
             logger.warning(
-                f"Cancelling {len(pending)} bg task(s) that did not finish in 5s"
+                f"Cancelling {len(pending)} bg task(s) after drain timeout"
             )
             for task in pending:
                 task.cancel()
-            # Wait for cancellations to propagate; swallow CancelledError + any
-                # late exception from the task body (we're shutting down anyway).
+            # Swallow CancelledError + any late exception (we're shutting down).
             await asyncio.gather(*pending, return_exceptions=True)
 
     # Close the shared Telegram HTTP client
