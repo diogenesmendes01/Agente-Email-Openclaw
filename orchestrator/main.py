@@ -405,19 +405,20 @@ async def telegram_callback(request: Request):
 
         callback_query = body.get("callback_query")
         if callback_query:
-            await handle_callback(callback_query, services)
+            _fire_and_forget(handle_callback(callback_query, services))
             return JSONResponse(status_code=200, content={"status": "ok"})
 
         message = body.get("message")
         if message and message.get("text"):
-            await handle_text_message(message, services)
+            _fire_and_forget(handle_text_message(message, services))
             return JSONResponse(status_code=200, content={"status": "ok"})
 
         return JSONResponse(status_code=200, content={"status": "ignored"})
 
     except Exception as e:
-        # Transient error (DB, Gmail, LLM) — return 500 so Telegram retries
-        logger.error(f"Telegram callback error: {e}", exc_info=True)
+        # Only infrastructure errors (JSON, services dict) reach here.
+        # Handler errors go to _log_task_result instead.
+        logger.error(f"Telegram callback infra error: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"status": "error"})
 
 
