@@ -354,6 +354,30 @@ async def gmail_webhook(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Background tasks spawned from webhooks. Strong ref prevents GC-before-finish
+# (known CPython bug with unreferenced asyncio.Tasks).
+_bg_tasks: set = set()
+
+
+def _log_task_result(task):
+    """Log exceptions from fire-and-forget tasks; never re-raise."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.error(f"Background webhook task failed: {exc}", exc_info=exc)
+
+
+def _fire_and_forget(coro):
+    """Schedule coroutine in background; webhook returns 200 immediately."""
+    import asyncio
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_log_task_result)
+    task.add_done_callback(_bg_tasks.discard)
+    return task
+
+
 @app.post("/telegram/callback")
 @limiter.limit("60/minute")
 async def telegram_callback(request: Request):
