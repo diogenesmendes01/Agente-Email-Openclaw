@@ -48,9 +48,26 @@ class TelegramService:
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.api_base = f"https://api.telegram.org/bot{self.bot_token}"
         self._configured = bool(self.bot_token)
-        
+
+        # Singleton HTTP/2 client with connection pool. Reused across all
+        # API calls — eliminates 200-500ms TCP+TLS handshake per call.
+        self._client = httpx.AsyncClient(
+            base_url=self.api_base,
+            http2=True,
+            limits=httpx.Limits(
+                max_keepalive_connections=50,
+                max_connections=100,
+                keepalive_expiry=30.0,
+            ),
+            timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0),
+        )
+
         if self._configured:
-            logger.info("TelegramService configurado")
+            logger.info("TelegramService configurado (HTTP/2 + keep-alive)")
+
+    async def aclose(self):
+        """Close the underlying HTTP client. Call during app shutdown."""
+        await self._client.aclose()
     
     # Limite do Telegram para mensagens
     MAX_MESSAGE_LENGTH = 4096
