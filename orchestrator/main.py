@@ -198,13 +198,25 @@ async def lifespan(app_instance):
     except asyncio.CancelledError:
         pass
 
-    # Wait for any in-flight webhook background tasks to complete (5s budget)
+    # Drain in-flight webhook background tasks.
+    # Wait up to 5s for voluntary completion; cancel anything still pending
+    # so it doesn't try to use the closed HTTP client / DB pool afterward.
     if bg_tasks:
         logger.info(f"Waiting for {len(bg_tasks)} webhook tasks to finish...")
         try:
-            await asyncio.wait(bg_tasks, timeout=5.0)
+            done, pending = await asyncio.wait(bg_tasks, timeout=5.0)
         except Exception as e:
             logger.warning(f"Error waiting for bg tasks: {e}")
+            pending = set(bg_tasks)
+        if pending:
+            logger.warning(
+                f"Cancelling {len(pending)} bg task(s) that did not finish in 5s"
+            )
+            for task in pending:
+                task.cancel()
+            # Wait for cancellations to propagate; swallow CancelledError + any
+                # late exception from the task body (we're shutting down anyway).
+            await asyncio.gather(*pending, return_exceptions=True)
 
     # Close the shared Telegram HTTP client
     try:
