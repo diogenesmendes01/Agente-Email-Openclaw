@@ -51,14 +51,15 @@ async def test_answer_callback(tg_service):
 async def test_edit_reply_markup(tg_service):
     mock_resp = MagicMock()
     mock_resp.status_code = 200
-    with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.post.return_value = mock_resp
-        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        keyboard = {"inline_keyboard": [[{"text": "OK", "callback_data": "ok"}]]}
-        result = await tg_service.edit_reply_markup(123, 456, keyboard)
-        assert result is True
+    tg_service._client.post = AsyncMock(return_value=mock_resp)
+
+    keyboard = {"inline_keyboard": [[{"text": "OK", "callback_data": "ok"}]]}
+    result = await tg_service.edit_reply_markup(123, 456, keyboard)
+
+    assert result is True
+    tg_service._client.post.assert_called_once()
+    call_url = tg_service._client.post.call_args[0][0]
+    assert "editMessageReplyMarkup" in call_url
 
 
 @pytest.mark.asyncio

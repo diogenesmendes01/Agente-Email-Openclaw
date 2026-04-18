@@ -362,48 +362,29 @@ class TelegramService:
         chat_id: Optional[str] = None,
         reply_markup: Optional[Dict] = None
     ) -> bool:
-        """
-        Edita texto de uma mensagem existente.
-        
-        Args:
-            message_id: ID da mensagem a editar
-            text: Novo texto da mensagem
-            chat_id: Chat ID (usa default se não informado)
-            reply_markup: Novos botões inline (opcional)
-        
-        Returns:
-            True se editou com sucesso, False caso contrário
-        """
+        """Edita texto de uma mensagem existente."""
         if not self._configured:
             logger.warning("Telegram não configurado")
             return False
-        
+
         chat_id = chat_id or self.chat_id
-        
         payload = {
             "chat_id": chat_id,
             "message_id": message_id,
             "text": text,
             "parse_mode": "HTML",
-            "disable_web_page_preview": True
+            "disable_web_page_preview": True,
         }
-        
         if reply_markup:
             payload["reply_markup"] = reply_markup
-        
+
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/editMessageText",
-                    json=payload
-                )
-                
-                if response.status_code == 200:
-                    logger.info(f"Mensagem {message_id} editada com sucesso")
-                    return True
-                else:
-                    logger.error(f"Erro ao editar mensagem: {response.status_code} - {response.text}")
-                    return False
+            response = await self._client.post("/editMessageText", json=payload)
+            if response.status_code == 200:
+                logger.info(f"Mensagem {message_id} editada com sucesso")
+                return True
+            logger.error(f"Erro ao editar mensagem: {response.status_code} - {response.text}")
+            return False
         except Exception as e:
             logger.error(f"Exceção ao editar mensagem: {e}")
             return False
@@ -473,16 +454,15 @@ class TelegramService:
     async def edit_reply_markup(self, chat_id: int, message_id: int, reply_markup: dict) -> bool:
         """Edit only the inline keyboard of a message."""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/editMessageReplyMarkup",
-                    json={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "reply_markup": reply_markup,
-                    },
-                )
-                return response.status_code == 200
+            response = await self._client.post(
+                "/editMessageReplyMarkup",
+                json={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "reply_markup": reply_markup,
+                },
+            )
+            return response.status_code == 200
         except Exception as e:
             logger.error(f"Error editing reply markup: {e}")
             return False
@@ -524,41 +504,24 @@ class TelegramService:
         message_id: int,
         chat_id: Optional[str] = None
     ) -> bool:
-        """
-        Remove botões inline de uma mensagem.
-        
-        Args:
-            message_id: ID da mensagem
-            chat_id: Chat ID (usa default se não informado)
-        
-        Returns:
-            True se removeu com sucesso, False caso contrário
-        """
+        """Remove botões inline de uma mensagem."""
         if not self._configured:
             logger.warning("Telegram não configurado")
             return False
-        
+
         chat_id = chat_id or self.chat_id
-        
         payload = {
             "chat_id": chat_id,
             "message_id": message_id,
-            "reply_markup": {"inline_keyboard": []}
+            "reply_markup": {"inline_keyboard": []},
         }
-        
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/editMessageReplyMarkup",
-                    json=payload
-                )
-                
-                if response.status_code == 200:
-                    logger.info(f"Botões removidos da mensagem {message_id}")
-                    return True
-                else:
-                    logger.error(f"Erro ao remover botões: {response.status_code} - {response.text}")
-                    return False
+            response = await self._client.post("/editMessageReplyMarkup", json=payload)
+            if response.status_code == 200:
+                logger.info(f"Botões removidos da mensagem {message_id}")
+                return True
+            logger.error(f"Erro ao remover botões: {response.status_code} - {response.text}")
+            return False
         except Exception as e:
             logger.error(f"Exceção ao remover botões: {e}")
             return False
