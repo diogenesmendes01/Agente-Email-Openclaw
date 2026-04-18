@@ -119,19 +119,22 @@ class EmailProcessor:
                     thread_context = thread_emails[-5:]  # Últimos 5 emails
                     logger.info(f"[{email_id}] Thread com {len(thread_emails)} mensagens")
 
-                    # Verifica se a última mensagem da thread foi enviada pelo dono (você)
-                    # Se sim, a thread já foi respondida e não precisa gerar rascunho.
-                    # Usa parsing RFC-5322 (não substring) para evitar falso-positivo em
-                    # emails tipo "admin@x.com" vs "admin@xavier.com".
-                    last_msg = thread_emails[-1] if thread_emails else None
-                    if last_msg:
-                        last_from = last_msg.get("from_email") or last_msg.get("from") or ""
-                        if emails_match(last_from, account):
+                    # Verifica se o dono ja respondeu em ALGUM momento da thread
+                    # (ignorando o email atual). Cobre tambem o caso:
+                    #   cliente -> dono (responde) -> cliente (nova msg)
+                    # onde a ultima msg nao eh do dono mas a thread esta em andamento.
+                    # Usa parsing RFC-5322 (nao substring) para evitar falso-positivo.
+                    for msg in thread_emails:
+                        if msg.get("id") == email_id:
+                            continue  # ignora o email atual
+                        sender = msg.get("from_email") or msg.get("from") or ""
+                        if emails_match(sender, account):
                             owner_already_replied = True
                             logger.info(
-                                f"[{email_id}] Ultima mensagem da thread eh do dono "
-                                f"({account}), thread ja respondida."
+                                f"[{email_id}] Dono ({account}) ja respondeu em algum "
+                                f"momento da thread (msg {msg.get('id', '?')})."
                             )
+                            break
             
             # 3. Buscar contexto
             logger.info(f"[{email_id}] Buscando contexto...")

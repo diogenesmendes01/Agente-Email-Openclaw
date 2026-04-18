@@ -278,6 +278,11 @@ class LLMService:
     
     MAX_PROMPT_TOKENS = 6000
 
+    # Section markers — kept as class constants so formatter and the
+    # size-management truncation logic never drift apart.
+    THREAD_SECTION_HEADER = "HISTORICO DA THREAD (mais antiga primeiro):"
+    CURRENT_EMAIL_HEADER = "EMAIL ATUAL:"
+
     def _estimate_tokens(self, text: str) -> int:
         """Rough token estimate: ~4 chars per token for mixed pt-BR/en"""
         return len(text) // 4
@@ -289,10 +294,11 @@ class LLMService:
         if estimated <= self.MAX_PROMPT_TOKENS:
             return prompt
 
-        # Try removing thread context
-        if "EMAILS ANTERIORES DESTA THREAD:" in prompt:
-            thread_start = prompt.index("EMAILS ANTERIORES DESTA THREAD:")
-            thread_end = prompt.find("EMAIL ATUAL:", thread_start)
+        # Try removing thread context (uses the same marker emitted by
+        # _format_thread_context — keep in sync via class constant).
+        if self.THREAD_SECTION_HEADER in prompt:
+            thread_start = prompt.index(self.THREAD_SECTION_HEADER)
+            thread_end = prompt.find(self.CURRENT_EMAIL_HEADER, thread_start)
             if thread_end > thread_start:
                 prompt = prompt[:thread_start] + prompt[thread_end:]
 
@@ -509,7 +515,7 @@ Responda em JSON:
         if not thread_context:
             return ""
         from orchestrator.utils.email_parser import emails_match
-        parts = ["\nHISTORICO DA THREAD (mais antiga primeiro):"]
+        parts = [f"\n{self.THREAD_SECTION_HEADER}"]
         for i, msg in enumerate(thread_context):
             msg_from = msg.get("from", "Desconhecido")
             msg_from_email = msg.get("from_email") or msg_from
@@ -586,7 +592,7 @@ Responda em JSON:
 
         prompt = f"""Decida a acao apropriada para este email.
 {owner_section}{replied_warning}{thread_text}
-EMAIL:
+EMAIL ATUAL:
 De: {email.get("from", "")}
 Assunto: {email.get("subject", "")}
 Corpo: {body_for_prompt}

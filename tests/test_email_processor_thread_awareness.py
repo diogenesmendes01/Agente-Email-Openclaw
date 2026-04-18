@@ -97,13 +97,13 @@ async def test_owner_already_replied_flag_true_when_last_msg_is_from_owner(proce
 
 
 @pytest.mark.asyncio
-async def test_owner_already_replied_flag_false_when_last_msg_from_external(processor):
-    """Last message from external -> flag should be False."""
+async def test_flag_false_when_no_owner_msg_in_thread(processor):
+    """Thread with only external messages -> flag False (owner never replied)."""
     account = "me@domain.com"
     processor.gmail.get_email.return_value = _email()
     processor.gmail.get_thread.return_value = [
-        {"from": "Me <me@domain.com>", "from_email": "me@domain.com", "body": "Oi", "date": "d1"},
-        {"from": "Other <other@domain.com>", "from_email": "other@domain.com", "body": "Re", "date": "d2"},
+        {"id": "pre1", "from": "Other <other@x.com>", "from_email": "other@x.com", "body": "Hi", "date": "d1"},
+        {"id": "em1", "from": "Other <other@x.com>", "from_email": "other@x.com", "body": "Re", "date": "d2"},
     ]
 
     await processor.process_email("em1", account)
@@ -138,6 +138,50 @@ async def test_no_thread_context_flag_false(processor):
 
     # get_thread should NOT have been called
     processor.gmail.get_thread.assert_not_called()
+
+    ctx = _extract_context(processor.llm.classify_email.call_args)
+    assert ctx.get("owner_already_replied") is False
+
+
+@pytest.mark.asyncio
+async def test_flag_true_when_owner_replied_earlier_but_external_is_last(processor):
+    """Regression (PR review item #1): common real-world sequence
+        1. cliente sends
+        2. dono replies
+        3. cliente sends new msg
+    The CURRENT email is msg 3 (external). The flag must still be True
+    because the dono has already replied earlier in the thread.
+    """
+    account = "me@domain.com"
+    processor.gmail.get_email.return_value = _email(email_id="em3")
+    processor.gmail.get_thread.return_value = [
+        {"id": "em1", "from": "Client <other@x.com>", "from_email": "other@x.com", "body": "Ola", "date": "d1"},
+        {"id": "em2", "from": "Me <me@domain.com>", "from_email": "me@domain.com", "body": "Retornando", "date": "d2"},
+        {"id": "em3", "from": "Client <other@x.com>", "from_email": "other@x.com", "body": "Duvida nova", "date": "d3"},
+    ]
+
+    await processor.process_email("em3", account)
+
+    ctx = _extract_context(processor.llm.classify_email.call_args)
+    assert ctx.get("owner_already_replied") is True, (
+        "Must detect that the owner already replied (msg em2) even when "
+        "the last message is from the external sender (msg em3)."
+    )
+
+
+@pytest.mark.asyncio
+async def test_flag_ignores_current_email_when_it_is_owners(processor):
+    """If only the CURRENT email is from the owner (no earlier reply),
+    the flag should be False — we don't count the email being processed
+    as a prior reply.
+    """
+    account = "me@domain.com"
+    processor.gmail.get_email.return_value = _email(email_id="em1")
+    processor.gmail.get_thread.return_value = [
+        {"id": "em1", "from": "Me <me@domain.com>", "from_email": "me@domain.com", "body": "x", "date": "d1"},
+    ]
+
+    await processor.process_email("em1", account)
 
     ctx = _extract_context(processor.llm.classify_email.call_args)
     assert ctx.get("owner_already_replied") is False

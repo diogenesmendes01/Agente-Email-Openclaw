@@ -111,3 +111,39 @@ class TestFormatThreadContext:
         ]
         result = self.svc._format_thread_context(thread, "admin@x.com")
         assert "[VOCE]" not in result
+
+
+class TestPromptSectionMarkers:
+    """Thread header used by the formatter MUST match what _manage_prompt_size
+    looks for when truncating. Catches header drift that broke truncation in
+    the past (formatter emitted 'HISTORICO DA THREAD' but truncator searched
+    for 'EMAILS ANTERIORES DESTA THREAD')."""
+
+    def setup_method(self):
+        self.svc = LLMService()
+
+    def test_format_thread_context_emits_canonical_header(self):
+        thread = [{"from": "a@b.com", "from_email": "a@b.com", "body": "x"}]
+        result = self.svc._format_thread_context(thread, "")
+        assert self.svc.THREAD_SECTION_HEADER in result
+
+    def test_truncation_removes_thread_section_when_prompt_too_large(self):
+        # Build a fake oversized prompt that contains both markers.
+        padding = "x" * (self.svc.MAX_PROMPT_TOKENS * 4 + 100)  # > limit
+        prompt = (
+            f"PROMPT HEADER\n\n"
+            f"{self.svc.THREAD_SECTION_HEADER}\n"
+            f"--- Msg 1 ---\nDe: a@b.com\nTexto: {padding}\n\n"
+            f"{self.svc.CURRENT_EMAIL_HEADER}\n"
+            f"De: x@y.com\nAssunto: T\nCorpo: short\n"
+        )
+        result = self.svc._manage_prompt_size(prompt)
+        # Thread section must have been stripped
+        assert self.svc.THREAD_SECTION_HEADER not in result
+        # Current email section must remain
+        assert self.svc.CURRENT_EMAIL_HEADER in result
+
+    def test_small_prompt_not_truncated(self):
+        """Prompts under the limit pass through unchanged."""
+        prompt = f"{self.svc.THREAD_SECTION_HEADER}\nfoo\n{self.svc.CURRENT_EMAIL_HEADER}\nbar"
+        assert self.svc._manage_prompt_size(prompt) == prompt
