@@ -9,6 +9,7 @@ import json
 import asyncio
 import logging
 import base64
+import threading
 from email.mime.text import MIMEText
 from typing import Dict, Any, List, Optional
 from pathlib import Path
@@ -44,6 +45,12 @@ class GmailService:
     def __init__(self):
         self._services: Dict[str, Any] = {}
         self._ready = False
+        # httplib2 (usado por googleapiclient) não é thread-safe no Python 3.12.
+        # Múltiplas chamadas .execute() concorrentes corrompem o estado SSL e causam segfault.
+        # Este lock serializa todas as chamadas sync à Gmail API.
+        # Usamos RLock (reentrant) para evitar deadlock caso um método do service
+        # (que adquire o lock) chame outro método do mesmo service (que também adquire).
+        self._api_lock = threading.RLock()
         self._init_credentials()
 
     def _init_credentials(self):
@@ -96,6 +103,14 @@ class GmailService:
     def is_ready(self) -> bool:
         return self._ready
 
+    def _locked_execute(self, request) -> Any:
+        """Executa uma request do googleapiclient sob o lock de thread-safety.
+
+        httplib2 não é thread-safe; ver docstring de __init__.
+        """
+        with self._api_lock:
+            return request.execute()
+
     # ============================================================
     # OPERAÇÕES GMAIL (async wrappers)
     # ============================================================
@@ -109,9 +124,10 @@ class GmailService:
 
         try:
             msg = await asyncio.to_thread(
+                self._locked_execute,
                 service.users().messages().get(
                     userId="me", id=email_id, format="full"
-                ).execute
+                ),
             )
             return self._parse_message(msg)
         except HttpError as e:
@@ -129,9 +145,10 @@ class GmailService:
 
         try:
             thread = await asyncio.to_thread(
+                self._locked_execute,
                 service.users().threads().get(
                     userId="me", id=thread_id, format="full"
-                ).execute
+                ),
             )
             messages = thread.get("messages", [])
             return [self._parse_message(msg) for msg in messages]
@@ -151,10 +168,11 @@ class GmailService:
 
         try:
             await asyncio.to_thread(
+                self._locked_execute,
                 service.users().messages().modify(
                     userId="me", id=email_id,
                     body={"removeLabelIds": ["INBOX", "UNREAD"]}
-                ).execute
+                ),
             )
             logger.info(f"Email arquivado: {email_id}")
             return True
@@ -170,13 +188,14 @@ class GmailService:
 
         try:
             await asyncio.to_thread(
+                self._locked_execute,
                 service.users().messages().modify(
                     userId="me", id=email_id,
                     body={
                         "removeLabelIds": ["INBOX", "UNREAD"],
                         "addLabelIds": ["SPAM"]
                     }
-                ).execute
+                ),
             )
             logger.info(f"Email marcado como spam: {email_id}")
             return True
@@ -204,9 +223,10 @@ class GmailService:
                 draft_body["message"]["threadId"] = thread_id
 
             draft = await asyncio.to_thread(
+                self._locked_execute,
                 service.users().drafts().create(
                     userId="me", body=draft_body
-                ).execute
+                ),
             )
             draft_id = draft.get("id", "")
             logger.info(f"Rascunho criado: {draft_id}")
@@ -251,9 +271,10 @@ class GmailService:
                 send_body["threadId"] = thread_id
 
             await asyncio.to_thread(
+                self._locked_execute,
                 service.users().messages().send(
                     userId="me", body=send_body
-                ).execute
+                ),
             )
             logger.info(f"Resposta enviada para {to}")
             return True
@@ -273,12 +294,13 @@ class GmailService:
             # e history.list retorna mudanças DEPOIS do startHistoryId
             start_id = str(max(1, int(history_id) - 1))
             response = await asyncio.to_thread(
+                self._locked_execute,
                 service.users().history().list(
                     userId="me",
                     startHistoryId=start_id,
                     historyTypes=["messageAdded"],
                     labelId="INBOX"
-                ).execute
+                ),
             )
 
             message_ids = []
@@ -293,11 +315,12 @@ class GmailService:
             if not message_ids:
                 logger.info(f"History vazio, buscando mensagem mais recente da INBOX...")
                 latest = await asyncio.to_thread(
+                    self._locked_execute,
                     service.users().messages().list(
                         userId="me",
                         labelIds=["INBOX"],
                         maxResults=1,
-                    ).execute
+                    ),
                 )
                 msgs = latest.get("messages", [])
                 if msgs:
@@ -325,6 +348,7 @@ class GmailService:
 
         try:
             response = await asyncio.to_thread(
+                self._locked_execute,
                 service.users().watch(
                     userId="me",
                     body={
@@ -332,7 +356,7 @@ class GmailService:
                         "labelIds": label_ids,
                         "labelFilterBehavior": "INCLUDE"
                     }
-                ).execute
+                ),
             )
             logger.info(f"Gmail Watch ativado para {account}: expira em {response.get('expiration')}")
             return response
@@ -349,10 +373,11 @@ class GmailService:
 
         try:
             await asyncio.to_thread(
+                self._locked_execute,
                 service.users().messages().modify(
                     userId="me", id=email_id,
                     body={"addLabelIds": [label]}
-                ).execute
+                ),
             )
             return True
         except HttpError as e:
@@ -367,9 +392,10 @@ class GmailService:
             return None
         try:
             result = await asyncio.to_thread(
+                self._locked_execute,
                 service.users().messages().attachments().get(
                     userId="me", messageId=email_id, id=attachment_id
-                ).execute
+                ),
             )
             data = result.get("data", "")
             return base64.urlsafe_b64decode(data) if data else None
