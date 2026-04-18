@@ -466,55 +466,24 @@ Responda em JSON:
         """Constrói prompt de resumo com contexto da empresa"""
         context = context or {}
         company = context.get("company_profile", {})
-        thread_context = context.get("thread_context", [])
-        owner_already_replied = context.get("owner_already_replied", False)
-        owner_email = context.get("owner_email", "")
 
         company_section = ""
         if company:
             company_section = f"\nEmpresa: {company.get('nome', 'N/A')} ({company.get('setor', 'N/A')})\n"
 
-        thread_text = self._format_thread_context(thread_context, owner_email)
-
-        replied_warning = ""
-        if owner_already_replied:
-            replied_warning = (
-                "\n⚠️ ATENCAO: O dono da conta JA RESPONDEU nesta thread. "
-                "Ao resumir, mencione que a conversa ja esta em andamento.\n"
-            )
-
-        prompt = f"""Resuma este email em portugues considerando o historico da thread.
-Responda APENAS com JSON valido, sem texto adicional.
-{company_section}{replied_warning}{thread_text}
-EMAIL ATUAL:
+        prompt = f"""Resuma este email em portugues. Responda APENAS com JSON valido, sem texto adicional.
+{company_section}
+EMAIL:
 De: {email.get("from", "")}
 Assunto: {email.get("subject", "")}
 Corpo: {(email.get("body_clean") or email.get("body", ""))[:1500]}
 
 Responda em JSON:
-{{"resumo": "resumo em 1-2 frases (se for thread em andamento, mencione isso)", "entidades": {{"cliente": ""}}, "sentimento": "neutro"}}"""
+{{"resumo": "resumo em 1-2 frases", "entidades": {{"cliente": ""}}, "sentimento": "neutro"}}"""
 
         custom = (context or {}).get("account_prompt_config") if isinstance(context, dict) else None
         wrapped = self.prompt_builder.wrap("summary", prompt, custom)
         return self._manage_prompt_size(wrapped)
-
-    def _format_thread_context(self, thread_context: list, owner_email: str = "") -> str:
-        """Format thread context for prompts, tagging messages from owner."""
-        if not thread_context:
-            return ""
-        owner_email_lower = (owner_email or "").lower()
-        parts = ["\nHISTORICO DA THREAD (mais antiga primeiro):"]
-        for i, msg in enumerate(thread_context):
-            msg_from = msg.get("from", "Desconhecido")
-            msg_from_email = (msg.get("from_email") or msg_from).lower()
-            is_owner = owner_email_lower and owner_email_lower in msg_from_email
-            tag = " [VOCE]" if is_owner else ""
-            body_preview = (msg.get("body_clean") or msg.get("body", ""))[:500]
-            parts.append(f"--- Msg {i+1}{tag} ---")
-            parts.append(f"De: {msg_from}")
-            parts.append(f"Data: {msg.get('date', '')}")
-            parts.append(f"Texto: {body_preview}")
-        return "\n".join(parts) + "\n"
     
     def _build_action_prompt(
         self, email: Dict, classification: Dict, summary: Dict,
@@ -527,8 +496,6 @@ Responda em JSON:
         sender_profile = context.get("sender_profile", {})
         owner_name = context.get("owner_name", "")
         owner_email = context.get("owner_email", "")
-        thread_context = context.get("thread_context", [])
-        owner_already_replied = context.get("owner_already_replied", False)
 
         company_section = ""
         if company:
@@ -567,19 +534,8 @@ Responda em JSON:
         if len(body_raw) > 2000:
             body_for_prompt += "\n[...corpo truncado...]"
 
-        thread_text = self._format_thread_context(thread_context, owner_email)
-
-        replied_warning = ""
-        if owner_already_replied:
-            replied_warning = (
-                "\n⚠️ ATENCAO CRITICA: O dono da conta JA RESPONDEU nesta thread.\n"
-                "A thread ja esta em andamento — NAO gere um rascunho de resposta inicial/generico.\n"
-                "Se precisar gerar rascunho, use o contexto da conversa (nao trate como email novo).\n"
-                "Recomenda-se acao='notificar' ou 'arquivar' (thread ja respondida).\n"
-            )
-
         prompt = f"""Decida a acao apropriada para este email.
-{owner_section}{replied_warning}{thread_text}
+{owner_section}
 EMAIL:
 De: {email.get("from", "")}
 Assunto: {email.get("subject", "")}
