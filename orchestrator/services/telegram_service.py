@@ -420,33 +420,31 @@ class TelegramService:
     @_retry_external
     async def set_webhook(self, url: str, secret_token: str) -> bool:
         """Register webhook URL with Telegram."""
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{self.api_base}/setWebhook",
-                json={
-                    "url": url,
-                    "secret_token": secret_token,
-                    "allowed_updates": ["callback_query", "message"],
-                },
-            )
-            if response.status_code == 200 and response.json().get("ok"):
-                logger.info(f"Webhook registered: {url}")
-                return True
-            logger.error(f"Webhook registration failed: {response.text}")
-            raise httpx.HTTPStatusError(
-                f"Webhook registration failed: {response.status_code}",
-                request=response.request, response=response,
-            )
+        response = await self._client.post(
+            "/setWebhook",
+            json={
+                "url": url,
+                "secret_token": secret_token,
+                "allowed_updates": ["callback_query", "message"],
+            },
+        )
+        if response.status_code == 200 and response.json().get("ok"):
+            logger.info(f"Webhook registered: {url}")
+            return True
+        logger.error(f"Webhook registration failed: {response.text}")
+        raise httpx.HTTPStatusError(
+            f"Webhook registration failed: {response.status_code}",
+            request=response.request, response=response,
+        )
 
     async def answer_callback(self, callback_id: str, text: str) -> bool:
         """Answer a callback query (acknowledge button press)."""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/answerCallbackQuery",
-                    json={"callback_query_id": callback_id, "text": text},
-                )
-                return response.status_code == 200
+            response = await self._client.post(
+                "/answerCallbackQuery",
+                json={"callback_query_id": callback_id, "text": text},
+            )
+            return response.status_code == 200
         except Exception as e:
             logger.error(f"Error answering callback: {e}")
             return False
@@ -470,12 +468,11 @@ class TelegramService:
     async def delete_message(self, chat_id: int, message_id: int) -> bool:
         """Delete a message."""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/deleteMessage",
-                    json={"chat_id": chat_id, "message_id": message_id},
-                )
-                return response.status_code == 200
+            response = await self._client.post(
+                "/deleteMessage",
+                json={"chat_id": chat_id, "message_id": message_id},
+            )
+            return response.status_code == 200
         except Exception as e:
             logger.error(f"Error deleting message: {e}")
             return False

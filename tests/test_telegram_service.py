@@ -35,16 +35,14 @@ def tg_service():
 async def test_answer_callback(tg_service):
     mock_resp = MagicMock()
     mock_resp.status_code = 200
-    with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.post.return_value = mock_resp
-        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        result = await tg_service.answer_callback("cb123", "Done!")
-        assert result is True
-        mock_client.post.assert_called_once()
-        call_url = mock_client.post.call_args[0][0]
-        assert "answerCallbackQuery" in call_url
+    tg_service._client.post = AsyncMock(return_value=mock_resp)
+
+    result = await tg_service.answer_callback("cb123", "Done!")
+
+    assert result is True
+    tg_service._client.post.assert_called_once()
+    call_url = tg_service._client.post.call_args[0][0]
+    assert "answerCallbackQuery" in call_url
 
 
 @pytest.mark.asyncio
@@ -66,13 +64,11 @@ async def test_edit_reply_markup(tg_service):
 async def test_delete_message(tg_service):
     mock_resp = MagicMock()
     mock_resp.status_code = 200
-    with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.post.return_value = mock_resp
-        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        result = await tg_service.delete_message(123, 456)
-        assert result is True
+    tg_service._client.post = AsyncMock(return_value=mock_resp)
+
+    result = await tg_service.delete_message(123, 456)
+
+    assert result is True
 
 
 @pytest.mark.asyncio
@@ -80,13 +76,11 @@ async def test_set_webhook(tg_service):
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {"ok": True}
-    with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.post.return_value = mock_resp
-        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        result = await tg_service.set_webhook("https://example.com/telegram/callback", "secret123")
-        assert result is True
+    tg_service._client.post = AsyncMock(return_value=mock_resp)
+
+    result = await tg_service.set_webhook("https://example.com/telegram/callback", "secret123")
+
+    assert result is True
 
 
 def test_acao_usuario_fallback_to_justificativa(tg_service):
