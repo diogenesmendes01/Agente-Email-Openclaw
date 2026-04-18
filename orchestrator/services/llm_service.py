@@ -278,6 +278,11 @@ class LLMService:
     
     MAX_PROMPT_TOKENS = 6000
 
+    # Section markers — kept as class constants so formatter and the
+    # size-management truncation logic never drift apart.
+    THREAD_SECTION_HEADER = "HISTORICO DA THREAD (mais antiga primeiro):"
+    CURRENT_EMAIL_HEADER = "EMAIL ATUAL:"
+
     def _estimate_tokens(self, text: str) -> int:
         """Rough token estimate: ~4 chars per token for mixed pt-BR/en"""
         return len(text) // 4
@@ -289,10 +294,11 @@ class LLMService:
         if estimated <= self.MAX_PROMPT_TOKENS:
             return prompt
 
-        # Try removing thread context
-        if "EMAILS ANTERIORES DESTA THREAD:" in prompt:
-            thread_start = prompt.index("EMAILS ANTERIORES DESTA THREAD:")
-            thread_end = prompt.find("EMAIL ATUAL:", thread_start)
+        # Try removing thread context (uses the same marker emitted by
+        # _format_thread_context — keep in sync via class constant).
+        if self.THREAD_SECTION_HEADER in prompt:
+            thread_start = prompt.index(self.THREAD_SECTION_HEADER)
+            thread_end = prompt.find(self.CURRENT_EMAIL_HEADER, thread_start)
             if thread_end > thread_start:
                 prompt = prompt[:thread_start] + prompt[thread_end:]
 
@@ -337,6 +343,7 @@ class LLMService:
         domain_rules = context.get("domain_rules", [])
         owner_name = context.get("owner_name", "")
         owner_email = context.get("owner_email", "")
+        owner_already_replied = context.get("owner_already_replied", False)
 
         sections = []
 
@@ -348,6 +355,14 @@ class LLMService:
                 f"Email: {owner_email or 'N/A'}\n"
                 f"IMPORTANTE: Este email pertence a {owner_name or owner_email}. "
                 f"Ele e o DESTINATARIO que esta lendo os emails recebidos, NAO e um contato externo."
+            )
+
+        # Aviso: thread ja respondida pelo dono
+        if owner_already_replied:
+            sections.append(
+                "[WARNING] O dono da conta JA RESPONDEU nesta thread. "
+                "A conversa ja esta em andamento — considere isso ao avaliar prioridade e urgencia "
+                "(provavelmente nao e um email aguardando resposta inicial)."
             )
 
         if company:
@@ -413,14 +428,7 @@ class LLMService:
                 similar_text += line + "\n"
             sections.append(similar_text)
 
-        thread_text = ""
-        if thread_context:
-            thread_text = "\nEMAILS ANTERIORES DESTA THREAD:\n"
-            for i, msg in enumerate(thread_context[-2:]):
-                thread_text += f"--- Mensagem {i+1} ---\n"
-                thread_text += f"De: {msg.get('from', 'Desconhecido')}\n"
-                thread_text += f"Data: {msg.get('date', '')}\n"
-                thread_text += f"Texto: {msg.get('body', '')[:300]}\n\n"
+        thread_text = self._format_thread_context(thread_context, owner_email)
 
         enrichment = "\n\n".join(sections)
 
@@ -466,24 +474,59 @@ Responda em JSON:
         """Constrói prompt de resumo com contexto da empresa"""
         context = context or {}
         company = context.get("company_profile", {})
+        thread_context = context.get("thread_context", [])
+        owner_already_replied = context.get("owner_already_replied", False)
+        owner_email = context.get("owner_email", "")
 
         company_section = ""
         if company:
             company_section = f"\nEmpresa: {company.get('nome', 'N/A')} ({company.get('setor', 'N/A')})\n"
 
-        prompt = f"""Resuma este email em portugues. Responda APENAS com JSON valido, sem texto adicional.
-{company_section}
-EMAIL:
+        thread_text = self._format_thread_context(thread_context, owner_email)
+
+        replied_warning = ""
+        if owner_already_replied:
+            replied_warning = (
+                "\n[WARNING] ATENCAO: O dono da conta JA RESPONDEU nesta thread. "
+                "Ao resumir, mencione que a conversa ja esta em andamento.\n"
+            )
+
+        prompt = f"""Resuma este email em portugues considerando o historico da thread.
+Responda APENAS com JSON valido, sem texto adicional.
+{company_section}{replied_warning}{thread_text}
+EMAIL ATUAL:
 De: {email.get("from", "")}
 Assunto: {email.get("subject", "")}
 Corpo: {(email.get("body_clean") or email.get("body", ""))[:1500]}
 
 Responda em JSON:
-{{"resumo": "resumo em 1-2 frases", "entidades": {{"cliente": ""}}, "sentimento": "neutro"}}"""
+{{"resumo": "resumo em 1-2 frases (se for thread em andamento, mencione isso)", "entidades": {{"cliente": ""}}, "sentimento": "neutro"}}"""
 
         custom = (context or {}).get("account_prompt_config") if isinstance(context, dict) else None
         wrapped = self.prompt_builder.wrap("summary", prompt, custom)
         return self._manage_prompt_size(wrapped)
+
+    def _format_thread_context(self, thread_context: list, owner_email: str = "") -> str:
+        """Format thread context for prompts, tagging messages from owner.
+
+        Uses email-address parsing (not substring) to avoid false positives
+        like ``admin@x.com`` matching ``admin@xavier.com``.
+        """
+        if not thread_context:
+            return ""
+        from orchestrator.utils.email_parser import emails_match
+        parts = [f"\n{self.THREAD_SECTION_HEADER}"]
+        for i, msg in enumerate(thread_context):
+            msg_from = msg.get("from", "Desconhecido")
+            msg_from_email = msg.get("from_email") or msg_from
+            is_owner = bool(owner_email) and emails_match(msg_from_email, owner_email)
+            tag = " [VOCE]" if is_owner else ""
+            body_preview = (msg.get("body_clean") or msg.get("body", ""))[:500]
+            parts.append(f"--- Msg {i+1}{tag} ---")
+            parts.append(f"De: {msg_from}")
+            parts.append(f"Data: {msg.get('date', '')}")
+            parts.append(f"Texto: {body_preview}")
+        return "\n".join(parts) + "\n"
     
     def _build_action_prompt(
         self, email: Dict, classification: Dict, summary: Dict,
@@ -496,6 +539,8 @@ Responda em JSON:
         sender_profile = context.get("sender_profile", {})
         owner_name = context.get("owner_name", "")
         owner_email = context.get("owner_email", "")
+        thread_context = context.get("thread_context", [])
+        owner_already_replied = context.get("owner_already_replied", False)
 
         company_section = ""
         if company:
@@ -534,9 +579,20 @@ Responda em JSON:
         if len(body_raw) > 2000:
             body_for_prompt += "\n[...corpo truncado...]"
 
+        thread_text = self._format_thread_context(thread_context, owner_email)
+
+        replied_warning = ""
+        if owner_already_replied:
+            replied_warning = (
+                "\n[WARNING] ATENCAO CRITICA: O dono da conta JA RESPONDEU nesta thread.\n"
+                "A thread ja esta em andamento — NAO gere um rascunho de resposta inicial/generico.\n"
+                "Se precisar gerar rascunho, use o contexto da conversa (nao trate como email novo).\n"
+                "Recomenda-se acao='notificar' ou 'arquivar' (thread ja respondida).\n"
+            )
+
         prompt = f"""Decida a acao apropriada para este email.
-{owner_section}
-EMAIL:
+{owner_section}{replied_warning}{thread_text}
+EMAIL ATUAL:
 De: {email.get("from", "")}
 Assunto: {email.get("subject", "")}
 Corpo: {body_for_prompt}

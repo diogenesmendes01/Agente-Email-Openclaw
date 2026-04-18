@@ -13,7 +13,7 @@ from orchestrator.services.qdrant_service import QdrantService
 from orchestrator.services.llm_service import LLMService
 from orchestrator.services.gmail_service import GmailService
 from orchestrator.services.telegram_service import TelegramService
-from orchestrator.utils.email_parser import EmailParser
+from orchestrator.utils.email_parser import EmailParser, emails_match
 from orchestrator.utils.text_cleaner import TextCleaner
 from orchestrator.utils.pdf_reader import PdfReader
 from orchestrator.services.learning_engine import LearningEngine
@@ -110,13 +110,36 @@ class EmailProcessor:
             # 2.5. Buscar contexto da thread se houver
             thread_id = email.get("threadId")
             thread_context = []
+            owner_already_replied = False
             if thread_id and thread_id != email_id:
                 logger.info(f"[{email_id}] Buscando contexto da thread {thread_id}...")
                 thread_emails = await self.gmail.get_thread(thread_id, account)
                 if thread_emails:
-                    # Pegar últimos emails da thread como contexto
-                    thread_context = thread_emails[-3:]  # Últimos 3 emails
-                    logger.info(f"[{email_id}] Thread com {len(thread_emails)} mensagens")
+                    # Remove o email atual da thread para nao duplicar conteudo
+                    # (ele ja aparece no bloco EMAIL ATUAL dos prompts).
+                    prior_msgs = [m for m in thread_emails if m.get("id") != email_id]
+
+                    # Contexto = ultimas 5 mensagens *anteriores* ao email atual.
+                    thread_context = prior_msgs[-5:]
+                    logger.info(
+                        f"[{email_id}] Thread com {len(thread_emails)} mensagens "
+                        f"({len(prior_msgs)} anteriores ao email atual)"
+                    )
+
+                    # Verifica se o dono ja respondeu em ALGUM momento da thread.
+                    # Cobre tambem o caso:
+                    #   cliente -> dono (responde) -> cliente (nova msg)
+                    # onde a ultima msg nao eh do dono mas a thread esta em andamento.
+                    # Usa parsing RFC-5322 (nao substring) para evitar falso-positivo.
+                    for msg in prior_msgs:
+                        sender = msg.get("from_email") or msg.get("from") or ""
+                        if emails_match(sender, account):
+                            owner_already_replied = True
+                            logger.info(
+                                f"[{email_id}] Dono ({account}) ja respondeu em algum "
+                                f"momento da thread (msg {msg.get('id', '?')})."
+                            )
+                            break
             
             # 3. Buscar contexto
             logger.info(f"[{email_id}] Buscando contexto...")
@@ -140,6 +163,7 @@ class EmailProcessor:
                 "thread_context": thread_context,  # Emails anteriores da thread
                 "owner_name": owner_name,
                 "owner_email": account,
+                "owner_already_replied": owner_already_replied,
             }
 
             # Fetch company profile and domain rules for LLM context

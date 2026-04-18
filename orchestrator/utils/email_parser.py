@@ -14,6 +14,34 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# RFC 5322 angle-bracket form OR bare email. Prefers the bracketed form when
+# both exist (e.g. `"Name" <user@example.com>` returns `user@example.com`).
+_EMAIL_RE = re.compile(r'<([^<>@\s]+@[^<>@\s]+)>|([^\s<>,"]+@[^\s<>,"]+)')
+
+
+def extract_email_address(value: str) -> str:
+    """Extract a clean lowercase email from a header string.
+
+    Handles:
+        'Diogenes <me@domain.com>'       -> 'me@domain.com'
+        'me@domain.com'                   -> 'me@domain.com'
+        '"Name" <a@b.com>, <c@d.com>'     -> 'a@b.com' (first match)
+        ''                                -> ''
+        None                              -> ''
+    """
+    if not value:
+        return ""
+    m = _EMAIL_RE.search(str(value))
+    if not m:
+        return ""
+    return (m.group(1) or m.group(2) or "").strip().lower()
+
+
+def emails_match(a: str, b: str) -> bool:
+    """Compare two possibly-formatted email strings by extracted address."""
+    return bool(extract_email_address(a)) and extract_email_address(a) == extract_email_address(b)
+
+
 class EmailParser:
     """Parser para extrair dados estruturados de emails"""
     
