@@ -70,6 +70,7 @@ from orchestrator.services.job_queue import JobQueue
 from orchestrator.handlers.telegram_callbacks import handle_callback, handle_text_message
 from orchestrator.services.playbook_service import PlaybookService
 from orchestrator.services.model_registry import ModelRegistry
+from orchestrator.utils.bg_tasks import fire_and_forget, drain as drain_bg_tasks
 
 # Serviços que não precisam de init async ficam no nível de módulo
 qdrant = QdrantService()
@@ -196,6 +197,17 @@ async def lifespan(app_instance):
         await cleanup_task
     except asyncio.CancelledError:
         pass
+
+    # Drain in-flight webhook background tasks (5s budget, then cancel).
+    # See orchestrator/utils/bg_tasks.drain for semantics.
+    await drain_bg_tasks(timeout=5.0)
+
+    # Close the shared Telegram HTTP client
+    try:
+        await telegram.aclose()
+    except Exception as e:
+        logger.warning(f"Error closing telegram client: {e}")
+
     await pool.close()
     logger.info("Email Agent shutdown — pool closed")
 
@@ -381,19 +393,20 @@ async def telegram_callback(request: Request):
 
         callback_query = body.get("callback_query")
         if callback_query:
-            await handle_callback(callback_query, services)
+            fire_and_forget(handle_callback(callback_query, services))
             return JSONResponse(status_code=200, content={"status": "ok"})
 
         message = body.get("message")
         if message and message.get("text"):
-            await handle_text_message(message, services)
+            fire_and_forget(handle_text_message(message, services))
             return JSONResponse(status_code=200, content={"status": "ok"})
 
         return JSONResponse(status_code=200, content={"status": "ignored"})
 
     except Exception as e:
-        # Transient error (DB, Gmail, LLM) — return 500 so Telegram retries
-        logger.error(f"Telegram callback error: {e}", exc_info=True)
+        # Only infrastructure errors (JSON, services dict) reach here.
+        # Handler errors go to _log_task_result instead.
+        logger.error(f"Telegram callback infra error: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"status": "error"})
 
 

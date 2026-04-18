@@ -48,9 +48,26 @@ class TelegramService:
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.api_base = f"https://api.telegram.org/bot{self.bot_token}"
         self._configured = bool(self.bot_token)
-        
+
+        # Singleton HTTP/2 client with connection pool. Reused across all
+        # API calls — eliminates 200-500ms TCP+TLS handshake per call.
+        self._client = httpx.AsyncClient(
+            base_url=self.api_base,
+            http2=True,
+            limits=httpx.Limits(
+                max_keepalive_connections=50,
+                max_connections=100,
+                keepalive_expiry=30.0,
+            ),
+            timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0),
+        )
+
         if self._configured:
-            logger.info("TelegramService configurado")
+            logger.info("TelegramService configurado (HTTP/2 + keep-alive)")
+
+    async def aclose(self):
+        """Close the underlying HTTP client. Call during app shutdown."""
+        await self._client.aclose()
     
     # Limite do Telegram para mensagens
     MAX_MESSAGE_LENGTH = 4096
@@ -104,7 +121,7 @@ class TelegramService:
             "chat_id": self.chat_id,
             "text": text,
             "parse_mode": "HTML",
-            "disable_web_page_preview": True
+            "disable_web_page_preview": True,
         }
         if topic_id:
             payload["message_thread_id"] = topic_id
@@ -112,25 +129,21 @@ class TelegramService:
             payload["reply_markup"] = reply_markup
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/sendMessage", json=payload
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    msg_id = data.get("result", {}).get("message_id")
-                    logger.info(f"Notificação enviada: message_id={msg_id}")
-                    return msg_id
-                else:
-                    logger.error(f"Erro Telegram: {response.status_code} - {response.text}")
-                    raise httpx.HTTPStatusError(
-                        f"Telegram API error: {response.status_code}",
-                        request=response.request, response=response,
-                    )
+            response = await self._client.post("/sendMessage", json=payload)
+            if response.status_code == 200:
+                data = response.json()
+                msg_id = data.get("result", {}).get("message_id")
+                logger.info(f"Notificação enviada: message_id={msg_id}")
+                return msg_id
+            logger.error(f"Erro Telegram: {response.status_code} - {response.text}")
+            raise httpx.HTTPStatusError(
+                f"Telegram API error: {response.status_code}",
+                request=response.request, response=response,
+            )
         except (httpx.TimeoutException, httpx.ConnectError):
-            raise  # let tenacity retry
+            raise
         except httpx.HTTPStatusError:
-            raise  # let tenacity retry
+            raise
         except Exception as e:
             logger.error(f"Erro ao enviar: {e}")
             raise
@@ -329,20 +342,15 @@ class TelegramService:
             "chat_id": chat_id,
             "message_thread_id": thread_id,
             "text": text,
-            "parse_mode": "HTML"
+            "parse_mode": "HTML",
         }
-        
         if buttons:
             payload["reply_markup"] = {"inline_keyboard": buttons}
-        
+
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/sendMessage",
-                    json=payload
-                )
-                if response.status_code == 200:
-                    return response.json().get("result", {}).get("message_id")
+            response = await self._client.post("/sendMessage", json=payload)
+            if response.status_code == 200:
+                return response.json().get("result", {}).get("message_id")
         except Exception as e:
             logger.error(f"Erro ao enviar confirmação: {e}")
         return None
@@ -354,48 +362,29 @@ class TelegramService:
         chat_id: Optional[str] = None,
         reply_markup: Optional[Dict] = None
     ) -> bool:
-        """
-        Edita texto de uma mensagem existente.
-        
-        Args:
-            message_id: ID da mensagem a editar
-            text: Novo texto da mensagem
-            chat_id: Chat ID (usa default se não informado)
-            reply_markup: Novos botões inline (opcional)
-        
-        Returns:
-            True se editou com sucesso, False caso contrário
-        """
+        """Edita texto de uma mensagem existente."""
         if not self._configured:
             logger.warning("Telegram não configurado")
             return False
-        
+
         chat_id = chat_id or self.chat_id
-        
         payload = {
             "chat_id": chat_id,
             "message_id": message_id,
             "text": text,
             "parse_mode": "HTML",
-            "disable_web_page_preview": True
+            "disable_web_page_preview": True,
         }
-        
         if reply_markup:
             payload["reply_markup"] = reply_markup
-        
+
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/editMessageText",
-                    json=payload
-                )
-                
-                if response.status_code == 200:
-                    logger.info(f"Mensagem {message_id} editada com sucesso")
-                    return True
-                else:
-                    logger.error(f"Erro ao editar mensagem: {response.status_code} - {response.text}")
-                    return False
+            response = await self._client.post("/editMessageText", json=payload)
+            if response.status_code == 200:
+                logger.info(f"Mensagem {message_id} editada com sucesso")
+                return True
+            logger.error(f"Erro ao editar mensagem: {response.status_code} - {response.text}")
+            return False
         except Exception as e:
             logger.error(f"Exceção ao editar mensagem: {e}")
             return False
@@ -431,33 +420,31 @@ class TelegramService:
     @_retry_external
     async def set_webhook(self, url: str, secret_token: str) -> bool:
         """Register webhook URL with Telegram."""
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{self.api_base}/setWebhook",
-                json={
-                    "url": url,
-                    "secret_token": secret_token,
-                    "allowed_updates": ["callback_query", "message"],
-                },
-            )
-            if response.status_code == 200 and response.json().get("ok"):
-                logger.info(f"Webhook registered: {url}")
-                return True
-            logger.error(f"Webhook registration failed: {response.text}")
-            raise httpx.HTTPStatusError(
-                f"Webhook registration failed: {response.status_code}",
-                request=response.request, response=response,
-            )
+        response = await self._client.post(
+            "/setWebhook",
+            json={
+                "url": url,
+                "secret_token": secret_token,
+                "allowed_updates": ["callback_query", "message"],
+            },
+        )
+        if response.status_code == 200 and response.json().get("ok"):
+            logger.info(f"Webhook registered: {url}")
+            return True
+        logger.error(f"Webhook registration failed: {response.text}")
+        raise httpx.HTTPStatusError(
+            f"Webhook registration failed: {response.status_code}",
+            request=response.request, response=response,
+        )
 
     async def answer_callback(self, callback_id: str, text: str) -> bool:
         """Answer a callback query (acknowledge button press)."""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/answerCallbackQuery",
-                    json={"callback_query_id": callback_id, "text": text},
-                )
-                return response.status_code == 200
+            response = await self._client.post(
+                "/answerCallbackQuery",
+                json={"callback_query_id": callback_id, "text": text},
+            )
+            return response.status_code == 200
         except Exception as e:
             logger.error(f"Error answering callback: {e}")
             return False
@@ -465,16 +452,15 @@ class TelegramService:
     async def edit_reply_markup(self, chat_id: int, message_id: int, reply_markup: dict) -> bool:
         """Edit only the inline keyboard of a message."""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/editMessageReplyMarkup",
-                    json={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "reply_markup": reply_markup,
-                    },
-                )
-                return response.status_code == 200
+            response = await self._client.post(
+                "/editMessageReplyMarkup",
+                json={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "reply_markup": reply_markup,
+                },
+            )
+            return response.status_code == 200
         except Exception as e:
             logger.error(f"Error editing reply markup: {e}")
             return False
@@ -482,12 +468,11 @@ class TelegramService:
     async def delete_message(self, chat_id: int, message_id: int) -> bool:
         """Delete a message."""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/deleteMessage",
-                    json={"chat_id": chat_id, "message_id": message_id},
-                )
-                return response.status_code == 200
+            response = await self._client.post(
+                "/deleteMessage",
+                json={"chat_id": chat_id, "message_id": message_id},
+            )
+            return response.status_code == 200
         except Exception as e:
             logger.error(f"Error deleting message: {e}")
             return False
@@ -504,12 +489,9 @@ class TelegramService:
         if reply_markup:
             payload["reply_markup"] = reply_markup
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/sendMessage", json=payload
-                )
-                if response.status_code == 200:
-                    return response.json().get("result", {}).get("message_id")
+            response = await self._client.post("/sendMessage", json=payload)
+            if response.status_code == 200:
+                return response.json().get("result", {}).get("message_id")
         except Exception as e:
             logger.error(f"Error sending text: {e}")
         return None
@@ -519,41 +501,24 @@ class TelegramService:
         message_id: int,
         chat_id: Optional[str] = None
     ) -> bool:
-        """
-        Remove botões inline de uma mensagem.
-        
-        Args:
-            message_id: ID da mensagem
-            chat_id: Chat ID (usa default se não informado)
-        
-        Returns:
-            True se removeu com sucesso, False caso contrário
-        """
+        """Remove botões inline de uma mensagem."""
         if not self._configured:
             logger.warning("Telegram não configurado")
             return False
-        
+
         chat_id = chat_id or self.chat_id
-        
         payload = {
             "chat_id": chat_id,
             "message_id": message_id,
-            "reply_markup": {"inline_keyboard": []}
+            "reply_markup": {"inline_keyboard": []},
         }
-        
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{self.api_base}/editMessageReplyMarkup",
-                    json=payload
-                )
-                
-                if response.status_code == 200:
-                    logger.info(f"Botões removidos da mensagem {message_id}")
-                    return True
-                else:
-                    logger.error(f"Erro ao remover botões: {response.status_code} - {response.text}")
-                    return False
+            response = await self._client.post("/editMessageReplyMarkup", json=payload)
+            if response.status_code == 200:
+                logger.info(f"Botões removidos da mensagem {message_id}")
+                return True
+            logger.error(f"Erro ao remover botões: {response.status_code} - {response.text}")
+            return False
         except Exception as e:
             logger.error(f"Exceção ao remover botões: {e}")
             return False

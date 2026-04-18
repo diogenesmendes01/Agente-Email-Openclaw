@@ -1,4 +1,5 @@
 """Tests for telegram_callbacks router."""
+import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -33,6 +34,7 @@ async def test_route_archive_shows_confirmation():
     services["db"].get_account.return_value = {"id": 1}
     cb = _make_callback("archive")
     await handle_callback(cb, services)
+    await asyncio.sleep(0)  # yield to event loop so create_task can run
     services["telegram"].answer_callback.assert_called_once()
     services["telegram"].edit_message.assert_called_once()
 
@@ -85,6 +87,7 @@ async def test_unknown_action_logged():
     services = _make_services()
     cb = _make_callback("unknown_action")
     await handle_callback(cb, services)
+    await asyncio.sleep(0)  # yield to event loop so create_task can run
     services["telegram"].answer_callback.assert_called_once()
 
 
