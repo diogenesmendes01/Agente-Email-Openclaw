@@ -35,7 +35,7 @@ if log_dir.exists() or os.getenv("EMAIL_AGENT_LOG_FILE"):
     log_dir.mkdir(parents=True, exist_ok=True)
     log_handlers.append(logging.FileHandler(log_dir / "email_agent.log"))
 
-from orchestrator.middleware.request_id import RequestIdFilter, RequestIdMiddleware
+from orchestrator.middleware.request_id import RequestIdFilter, RequestIdMiddleware, request_id_var
 
 logging.basicConfig(
     level=logging.INFO,
@@ -155,18 +155,21 @@ async def lifespan(app_instance):
         run_resilient_worker(
             "retry", _do_retry,
             interval=60, iteration_timeout=60,
+            request_id_var=request_id_var,
         )
     )
     maint_task = asyncio.create_task(
         run_resilient_worker(
             "maintenance", _do_maintenance,
             interval=86400, iteration_timeout=120,
+            request_id_var=request_id_var,
         )
     )
     cleanup_task = asyncio.create_task(
         run_resilient_worker(
             "cleanup_pending", _do_cleanup_pending,
             interval=60, iteration_timeout=180,
+            request_id_var=request_id_var,
         )
     )
 
