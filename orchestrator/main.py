@@ -71,6 +71,7 @@ from orchestrator.services.job_queue import JobQueue
 from orchestrator.handlers.telegram_callbacks import handle_callback, handle_text_message
 from orchestrator.services.playbook_service import PlaybookService
 from orchestrator.services.model_registry import ModelRegistry
+from orchestrator.utils.worker import run_resilient_worker
 
 # Serviços que não precisam de init async ficam no nível de módulo
 qdrant = QdrantService()
@@ -123,52 +124,51 @@ async def lifespan(app_instance):
     # Background workers
     import asyncio
 
-    async def retry_worker():
-        """Retries failed jobs every 60 seconds."""
-        while True:
+    async def _do_retry():
+        """One iteration of retry work — process up to 5 pending jobs."""
+        jobs = await job_queue.get_pending(limit=5)
+        for job in jobs:
             try:
-                jobs = await job_queue.get_pending(limit=5)
-                for job in jobs:
-                    try:
-                        if job["job_type"] == "process_email":
-                            payload = json.loads(job["payload"]) if isinstance(job["payload"], str) else job["payload"]
-                            result = await processor.process_email(payload["email_id"], payload["account"], _is_retry=True)
-                            if result.get("status") == "error":
-                                raise RuntimeError(result.get("error", "process_email returned error"))
-                        await job_queue.mark_completed(job["id"])
-                    except Exception as e:
-                        is_dead = await job_queue.mark_failed(job["id"], str(e))
-                        if is_dead:
-                            await alerts.alert("job_dead", f"Job #{job['id']} ({job['job_type']}) died: {e}")
+                if job["job_type"] == "process_email":
+                    payload = json.loads(job["payload"]) if isinstance(job["payload"], str) else job["payload"]
+                    result = await processor.process_email(payload["email_id"], payload["account"], _is_retry=True)
+                    if result.get("status") == "error":
+                        raise RuntimeError(result.get("error", "process_email returned error"))
+                await job_queue.mark_completed(job["id"])
             except Exception as e:
-                logger.error(f"Retry worker error: {e}")
-            await asyncio.sleep(60)
+                is_dead = await job_queue.mark_failed(job["id"], str(e))
+                if is_dead:
+                    await alerts.alert("job_dead", f"Job #{job['id']} ({job['job_type']}) died: {e}")
 
-    async def maintenance_worker():
-        """Daily maintenance — cleanup old metrics. Runs once at startup, then every 24h."""
-        while True:
-            try:
-                result = await metrics.cleanup(retention_days=_settings.metrics_retention_days)
-                logger.info(f"Metrics cleanup: {result}")
-            except Exception as e:
-                logger.error(f"Metrics cleanup error: {e}")
-            await asyncio.sleep(86400)
+    async def _do_maintenance():
+        """One iteration of daily metrics cleanup."""
+        result = await metrics.cleanup(retention_days=_settings.metrics_retention_days)
+        logger.info(f"Metrics cleanup: {result}")
 
-    retry_task = asyncio.create_task(retry_worker())
-    maint_task = asyncio.create_task(maintenance_worker())
+    async def _do_cleanup_pending():
+        """One iteration of expired pending action cleanup."""
+        count = await db.cleanup_expired_actions()
+        if count > 0:
+            logger.info(f"Cleaned {count} expired pending actions")
 
-    async def cleanup_pending_worker():
-        """Clean up expired pending actions every 60 seconds."""
-        while True:
-            try:
-                count = await db.cleanup_expired_actions()
-                if count > 0:
-                    logger.info(f"Cleaned {count} expired pending actions")
-            except Exception as e:
-                logger.error(f"Pending cleanup error: {e}")
-            await asyncio.sleep(60)
-
-    cleanup_task = asyncio.create_task(cleanup_pending_worker())
+    retry_task = asyncio.create_task(
+        run_resilient_worker(
+            "retry", _do_retry,
+            interval=60, iteration_timeout=60,
+        )
+    )
+    maint_task = asyncio.create_task(
+        run_resilient_worker(
+            "maintenance", _do_maintenance,
+            interval=86400, iteration_timeout=120,
+        )
+    )
+    cleanup_task = asyncio.create_task(
+        run_resilient_worker(
+            "cleanup_pending", _do_cleanup_pending,
+            interval=60, iteration_timeout=180,
+        )
+    )
 
     logger.info("Email Agent v3.0 started — PostgreSQL connected, workers running")
 
