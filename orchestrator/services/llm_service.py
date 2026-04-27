@@ -132,12 +132,20 @@ class LLMService:
         account_config: Dict[str, Any],
         context: Dict[str, Any] = None,
         model_override: str = None,
+        is_non_replyable: bool = False,
     ) -> Tuple[Dict[str, Any], ValidationMetadata]:
         """Decide acao (com validacao pos-LLM + 1 retry reforcado).
 
+        ``is_non_replyable``: quando True, o prompt omite a opcao "rascunho"
+        (Layer C — defesa em camadas para senders no-reply / categorias
+        automaticas). Default False mantem comportamento legado.
+
         Returns ``(result_dict, ValidationMetadata)``.
         """
-        prompt = self._build_action_prompt(email, classification, summary, account_config, context)
+        prompt = self._build_action_prompt(
+            email, classification, summary, account_config, context,
+            is_non_replyable=is_non_replyable,
+        )
 
         async def _call(p: str):
             return await self._call_llm(p, max_tokens=32768, model_override=model_override)
@@ -487,9 +495,15 @@ Responda em JSON:
     
     def _build_action_prompt(
         self, email: Dict, classification: Dict, summary: Dict,
-        config: Dict, context: Dict = None
+        config: Dict, context: Dict = None,
+        is_non_replyable: bool = False,
     ) -> str:
-        """Constrói prompt de ação com contexto da empresa"""
+        """Constrói prompt de ação com contexto da empresa.
+
+        Quando ``is_non_replyable=True``, a opcao "rascunho" e omitida da
+        lista de acoes possiveis (Layer C da defesa em camadas para emails
+        nao-respondiveis: noreply@, mailer-daemon@, newsletters, etc.).
+        """
         auto_reply = config.get("auto_reply", False)
         context = context or {}
         company = context.get("company_profile", {})
@@ -534,6 +548,39 @@ Responda em JSON:
         if len(body_raw) > 2000:
             body_for_prompt += "\n[...corpo truncado...]"
 
+        # Layer C: build actions list conditionally — when the email is
+        # non-replyable (no-reply sender or non-replyable category), omit
+        # the "rascunho" option entirely so the LLM cannot pick it.
+        actions_lines = [
+            '1. "notificar" - Apenas notificar no Telegram',
+            '2. "arquivar" - Arquivar email (newsletter, promocao)',
+            '3. "criar_task" - Criar tarefa no Notion',
+        ]
+        if not is_non_replyable:
+            actions_lines.append('4. "rascunho" - Criar rascunho de resposta (sem enviar)')
+        actions_block = "\n".join(actions_lines)
+
+        if is_non_replyable:
+            acao_enum = "notificar/arquivar/criar_task"
+            rascunho_section = (
+                "IMPORTANTE: este email e NAO-RESPONDIVEL (sender no-reply ou categoria automatica/transacional). "
+                "NAO gere rascunho_resposta. Escolha apenas entre notificar, arquivar ou criar_task."
+            )
+            json_rascunho_field = ""
+        else:
+            acao_enum = "notificar/arquivar/criar_task/rascunho"
+            rascunho_section = (
+                "IMPORTANTE: SEMPRE gere o campo \"rascunho_resposta\", independente da acao escolhida.\n"
+                "Excecao: NAO gere rascunho_resposta se a categoria for \"spam\" ou \"newsletter\".\n\n"
+                f"O rascunho deve ser em {company.get('idioma', 'portugues')}, tom {company.get('tom', 'profissional')}.\n"
+                + (
+                    f"Use esta assinatura: {company.get('assinatura', '')}"
+                    if company.get('assinatura')
+                    else f"Termine com: Att, {owner_name or 'Equipe'}"
+                )
+            )
+            json_rascunho_field = ',\n    "rascunho_resposta": "texto do rascunho sempre que nao for spam/newsletter"'
+
         prompt = f"""Decida a acao apropriada para este email.
 {owner_section}
 EMAIL:
@@ -549,16 +596,9 @@ CONFIGURACAO:
 - Resposta automatica: {"PERMITIDA" if auto_reply else "NAO PERMITIDA"}
 
 ACOES POSSIVEIS:
-1. "notificar" - Apenas notificar no Telegram
-2. "arquivar" - Arquivar email (newsletter, promocao)
-3. "criar_task" - Criar tarefa no Notion
-4. "rascunho" - Criar rascunho de resposta (sem enviar)
+{actions_block}
 
-IMPORTANTE: SEMPRE gere o campo "rascunho_resposta", independente da acao escolhida.
-Excecao: NAO gere rascunho_resposta se a categoria for "spam" ou "newsletter".
-
-O rascunho deve ser em {company.get('idioma', 'portugues')}, tom {company.get('tom', 'profissional')}.
-{f'Use esta assinatura: {company.get("assinatura", "")}' if company.get('assinatura') else f'Termine com: Att, {owner_name or "Equipe"}'}
+{rascunho_section}
 
 CAMPO "acao_usuario": Instrucao imperativa e concreta para o dono da conta (1-2 frases). DEVE citar valores, datas, prazos e protocolos do email quando existirem.
 Exemplo bom: "Negocie o debito de R$ 826,92 no portal Serasa antes de 05/02/2026 para evitar negativacao."
@@ -566,15 +606,14 @@ Exemplo ruim: "Verificar e tomar acao necessaria."
 
 Responda em JSON:
 {{
-    "acao": "notificar/arquivar/criar_task/rascunho",
+    "acao": "{acao_enum}",
     "justificativa": "por que essa acao",
     "acao_usuario": "instrucao imperativa curta citando valores/prazos",
     "task": {{
         "titulo": "titulo da tarefa se criar_task",
         "prioridade": "Alta/Media/Baixa",
         "prazo": "YYYY-MM-DD se aplicavel"
-    }},
-    "rascunho_resposta": "texto do rascunho sempre que nao for spam/newsletter"
+    }}{json_rascunho_field}
 }}"""
 
         custom = (context or {}).get("account_prompt_config") if isinstance(context, dict) else None

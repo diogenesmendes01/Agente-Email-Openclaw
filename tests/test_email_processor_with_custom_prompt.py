@@ -35,7 +35,7 @@ async def test_account_prompt_config_reaches_llm_context():
             cost_total_usd=0.0,
         )
 
-    async def fake_action(email, classification, summary, account_config, context=None, model_override=None):
+    async def fake_action(email, classification, summary, account_config, context=None, model_override=None, is_non_replyable=False):
         captured_contexts.append(("action", dict(context or {})))
         return {"acao": "notificar", "justificativa": "j", "acao_usuario": "u"}, MagicMock(
             model="m", retries=0, flags=[], json_parse_failed=False,

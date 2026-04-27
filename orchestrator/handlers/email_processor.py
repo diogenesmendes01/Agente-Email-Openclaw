@@ -13,10 +13,16 @@ from orchestrator.services.qdrant_service import QdrantService
 from orchestrator.services.llm_service import LLMService
 from orchestrator.services.gmail_service import GmailService
 from orchestrator.services.telegram_service import TelegramService
+from orchestrator.services.llm_validator import demote_rascunho_if_non_replyable
+from orchestrator.services.learning_engine import LearningEngine
+from orchestrator.settings import get_settings
 from orchestrator.utils.email_parser import EmailParser
 from orchestrator.utils.text_cleaner import TextCleaner
 from orchestrator.utils.pdf_reader import PdfReader
-from orchestrator.services.learning_engine import LearningEngine
+from orchestrator.utils.reply_policy import (
+    is_no_reply_sender,
+    is_non_replyable_category,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -268,13 +274,58 @@ class EmailProcessor:
             result["summary"] = summary
 
             # 6. Decidir ação
-            logger.info(f"[{email_id}] Decidindo ação...")
-            action, action_meta = await self.llm.decide_action(
-                email, classification, summary, config, context, model_override=model_override
+            # Reply policy (defesa em camadas):
+            #   - Layer A/B: detect non-replyable senders/categories upfront.
+            #   - Layer C: pass is_non_replyable to LLM so prompt omits "rascunho".
+            #   - Layer D: post-LLM, demote any leaked acao=rascunho -> notificar.
+            #   - Optional: NO_REPLY_AUTO_ARCHIVE=true skips the LLM action call
+            #     entirely for no-reply senders and forces acao=arquivar.
+            from_addr_for_policy = email.get("from", "")
+            categoria_for_policy = classification.get("categoria", "")
+            sender_is_no_reply = is_no_reply_sender(from_addr_for_policy)
+            is_non_replyable = (
+                sender_is_no_reply
+                or is_non_replyable_category(categoria_for_policy)
             )
+
+            # Optional shortcut: skip LLM action call entirely.
+            _settings = get_settings()
+            auto_archive_no_reply = bool(getattr(_settings, "no_reply_auto_archive", False))
+
+            no_reply_detected = False
+
+            if auto_archive_no_reply and sender_is_no_reply:
+                logger.info(
+                    f"[{email_id}] Sender no-reply + NO_REPLY_AUTO_ARCHIVE=true; "
+                    f"pulando LLM de acao e forcando acao=arquivar"
+                )
+                action = {
+                    "acao": "arquivar",
+                    "justificativa": "Sender no-reply (auto-archive)",
+                    "flags": {"rascunho_em_no_reply": True},
+                }
+                action_meta = None
+                no_reply_detected = True
+            else:
+                logger.info(f"[{email_id}] Decidindo ação...")
+                action, action_meta = await self.llm.decide_action(
+                    email, classification, summary, config, context,
+                    model_override=model_override,
+                    is_non_replyable=is_non_replyable,
+                )
+                # Layer D: rebaixa rascunho leak (LLM ignorou Layer C ou novo tipo).
+                action = demote_rascunho_if_non_replyable(
+                    action,
+                    from_addr=from_addr_for_policy,
+                    categoria=categoria_for_policy,
+                )
+                no_reply_detected = is_non_replyable or bool(
+                    (action.get("flags") or {}).get("rascunho_em_no_reply")
+                )
+
             validation_metas["action"] = action_meta
             result["action"] = action
-            
+
             # 7. Persistir decisão
             decision_data = {
                 "email_id": email_id,
@@ -286,9 +337,10 @@ class EmailProcessor:
                 "categoria": classification.get("categoria", "outro"),
                 "acao": action.get("acao", "notificar"),
                 "resumo": summary.get("resumo", ""),
+                "no_reply_detected": no_reply_detected,
                 "timestamp": result["timestamp"]
             }
-            
+
             # account_data and account_id already fetched above
             if account_id:
                 decision_data["account_id"] = account_id

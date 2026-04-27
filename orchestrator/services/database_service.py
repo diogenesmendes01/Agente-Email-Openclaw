@@ -168,13 +168,18 @@ class DatabaseService:
     # ── Decisions ──
 
     async def log_decision(self, data: Dict) -> int:
-        """Log email processing decision. Skips silently if already exists."""
+        """Log email processing decision. Skips silently if already exists.
+
+        ``data['no_reply_detected']`` (bool, default False) marca decisoes
+        em que reply_policy bateu — sender no-reply ou categoria nao-respondivel.
+        """
         async with self._pool.acquire() as conn:
             return await conn.fetchval(
                 """INSERT INTO decisions
                    (account_id, email_id, subject, sender, classification,
-                    priority, category, action, summary, reasoning_tokens)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    priority, category, action, summary, reasoning_tokens,
+                    no_reply_detected)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                    ON CONFLICT (account_id, email_id) DO NOTHING
                    RETURNING id""",
                 data.get("account_id"),
@@ -187,6 +192,7 @@ class DatabaseService:
                 data.get("acao", data.get("action", "")),
                 data.get("resumo", data.get("summary", "")),
                 data.get("reasoning_tokens", 0),
+                bool(data.get("no_reply_detected", False)),
             )
 
     # ── Tasks ──
