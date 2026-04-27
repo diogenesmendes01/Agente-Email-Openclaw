@@ -125,8 +125,18 @@ class EmailProcessor:
             result["status"] = "error"
             result["error"] = str(e)
 
-            # Enqueue for retry (only on first failure, not during retry worker reprocessing)
-            if self.job_queue and not _is_retry:
+            # Quando chamado pelo retry worker (_is_retry=True), re-lancar a
+            # excecao original para que job_queue.handle_failure() consiga
+            # rotear corretamente Retryable vs Fatal via classify_exception.
+            # Caso contrario, o except top-level perderia o tipo e tudo viraria
+            # FatalError pelo default conservador.
+            if _is_retry:
+                raise
+
+            # Webhook path (_is_retry=False): enfileirar para retry assincrono
+            # e retornar resultado dict. O retry worker pegara o job e chamara
+            # de novo com _is_retry=True.
+            if self.job_queue:
                 try:
                     acct = await self.db.get_account(account) if account else None
                     acct_id = acct["id"] if acct else None

@@ -124,3 +124,26 @@ async def test_backoff_resets_after_consecutive_successes():
     # if no reset happened, which would be 8s sleep + 3*0.01 OK time).
     gap_post_reset = fails[3][1] - fails[2][1]
     assert gap_post_reset < 5.0, f"Expected <5s gap (reset happened), got {gap_post_reset}s"
+
+
+def test_retry_worker_timeout_accommodates_llm_calls():
+    """retry_worker iteration_timeout must be large enough to handle
+    a batch of process_email calls (up to 5 jobs x 120s LLM timeout = 600s).
+
+    Issue 1 do PR #17: ``iteration_timeout=60`` era muito apertado — uma unica
+    chamada LLM lenta (timeout=120s em llm_service.py) ja excedia o limite,
+    cancelando lotes saudaveis no meio do processamento.
+    """
+    import inspect
+    import re
+    from orchestrator import main
+
+    source = inspect.getsource(main)
+    # Find the retry worker block — match ``"retry"`` followed by iteration_timeout=N
+    m = re.search(r'"retry"[^)]*iteration_timeout=(\d+)', source, re.DOTALL)
+    assert m, "Could not find retry worker iteration_timeout in main.py"
+    timeout = int(m.group(1))
+    assert timeout >= 600, (
+        f"retry worker iteration_timeout={timeout}s is too short. "
+        f"Each iteration may run up to 5 jobs x 120s LLM timeout = 600s worst case."
+    )

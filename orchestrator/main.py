@@ -131,11 +131,12 @@ async def lifespan(app_instance):
             try:
                 if job["job_type"] == "process_email":
                     payload = json.loads(job["payload"]) if isinstance(job["payload"], str) else job["payload"]
-                    result = await processor.process_email(payload["email_id"], payload["account"], _is_retry=True)
-                    if result.get("status") == "error":
-                        raise RuntimeError(result.get("error", "process_email returned error"))
+                    # process_email(_is_retry=True) re-lanca a excecao original
+                    # em caso de falha, preservando o tipo para handle_failure
+                    # rotear corretamente via classify_exception.
+                    await processor.process_email(payload["email_id"], payload["account"], _is_retry=True)
                 await job_queue.mark_completed(job["id"])
-            except Exception as e:
+            except Exception as e:  # exception aqui e a ORIGINAL tipada
                 is_dead = await job_queue.handle_failure(job["id"], e)
                 if is_dead:
                     await alerts.alert("job_dead", f"Job #{job['id']} ({job['job_type']}) died: {e}")
@@ -154,7 +155,11 @@ async def lifespan(app_instance):
     retry_task = asyncio.create_task(
         run_resilient_worker(
             "retry", _do_retry,
-            interval=60, iteration_timeout=60,
+            # iteration_timeout=600s: cada iteracao processa ate 5 jobs em
+            # serie (get_pending(limit=5)), e cada process_email() pode ter
+            # chamadas LLM com timeout=120s. Pior caso: 5 x 120s = 600s.
+            # Valor anterior (60s) era apertado e cancelava lotes saudaveis.
+            interval=60, iteration_timeout=600,
             request_id_var=request_id_var,
         )
     )

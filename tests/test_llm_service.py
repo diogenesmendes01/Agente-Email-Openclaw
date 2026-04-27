@@ -46,3 +46,24 @@ def test_action_prompt_omits_rascunho_for_non_replyable():
     # The JSON template must not have a `rascunho_resposta` field declaration
     # (i.e., the prompt must not ask the LLM to fill it in)
     assert '"rascunho_resposta": "texto do rascunho' not in prompt_restricted
+
+
+def test_classifier_prompt_source_lists_all_valid_categories():
+    """Static check: the classifier prompt source string must mention every
+    category in _VALID_CATEGORIES.
+
+    Issue 3 do PR #17: o prompt do classifier so listava 7 categorias antigas,
+    mas _VALID_CATEGORIES (Etapa 2) inclui ``notificacao_automatica`` e
+    ``transacional``. LLM nunca escolhia as novas -> Layer B (categoria) era
+    inalcancavel quando o sender nao batia com o regex.
+    """
+    import inspect
+    from orchestrator.services import llm_service
+    from orchestrator.services.llm_validator import _VALID_CATEGORIES
+
+    source = inspect.getsource(llm_service)
+    for cat in _VALID_CATEGORIES:
+        assert cat in source, (
+            f"Category '{cat}' from _VALID_CATEGORIES missing from llm_service.py — "
+            f"LLM will never pick it, breaking Layer B (category-based no-reply detection)."
+        )

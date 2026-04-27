@@ -455,7 +455,7 @@ Responda em JSON:
 {{
     "importante": true/false,
     "prioridade": "Alta/Media/Baixa",
-    "categoria": "cliente/financeiro/pessoal/trabalho/promocao/newsletter/outro",
+    "categoria": "cliente/financeiro/pessoal/trabalho/promocao/newsletter/notificacao_automatica/transacional/outro",
     "confianca": 0.0-1.0,
     "razao": "explicacao breve",
     "entidades": {{
