@@ -40,7 +40,11 @@ Hoje, quando o LLM decide ação `rascunho`, o sistema chama `gmail.create_draft
 - [ ] Botão "✉️ Enviar" no Telegram ainda envia resposta corretamente
 - [ ] Nenhum draft é criado na conta Gmail durante o teste end-to-end
 
-### 2.5. Risco
+### 2.5. Testes a remover/ajustar
+- Remover quaisquer testes em `tests/` que assertem `gmail.create_draft` foi chamado (provável: nenhum dedicado, mas verificar `tests/test_email_processor_*.py`)
+- Manter testes que verificam o fluxo `notificar` → Telegram com `rascunho_resposta` — esses não dependem do método removido
+
+### 2.6. Risco
 **Baixo.** Mudança isolada em 2 arquivos. Sem migração, sem mudança de schema, sem alteração de API externa.
 
 ---
@@ -67,8 +71,9 @@ Resultado: rascunhos inúteis são gerados, queimando tokens de LLM e poluindo o
 
 **Camada C — Prompt de ação ciente de irrespondibilidade**
 - Se `no_reply_sender = True` OU `categoria` em `{newsletter, promocao, notificacao_automatica, transacional}`:
-  - Substituir o prompt de ação por uma versão restrita: ações permitidas = `{"notificar", "arquivar", "criar_task"}` — `rascunho` é REMOVIDO da lista
-  - Economia: também pode pular o prompt de ação inteiramente para no-reply senders e forçar `arquivar` direto (configurável)
+  - **Default:** prompt de ação restrito — ações permitidas = `{"notificar", "arquivar", "criar_task"}`. `rascunho` é REMOVIDO da lista. LLM ainda decide entre as 3 restantes
+  - **Otimização opcional (não default):** controlada por flag `NO_REPLY_AUTO_ARCHIVE` (env var, default `false`) — quando `true` E sender bateu na regex, pula o prompt de ação inteiramente e força `arquivar` direto (economia de 1 chamada LLM por email no-reply)
+- Decisão: começar com `NO_REPLY_AUTO_ARCHIVE=false` (mais conservador) e ligar depois de coletar telemetria
 
 **Camada D — Validação pós-LLM**
 - Em `llm_validator.py`, adicionar regra: se sender é no-reply OU categoria é não-respondível, e LLM ainda retornou `acao = "rascunho"`, **rebaixa para `notificar`** e remove `rascunho_resposta`. Loga flag `rascunho_em_no_reply` na tabela `llm_quality_log`
@@ -82,7 +87,7 @@ Resultado: rascunhos inúteis são gerados, queimando tokens de LLM e poluindo o
 | `orchestrator/services/llm_service.py` | Prompt de ação condicional (com/sem opção rascunho); novas categorias |
 | `orchestrator/services/llm_validator.py` | Regra de rebaixamento + flag `rascunho_em_no_reply` |
 | `orchestrator/services/prompt_builder.py` | Suporte a variante "no-reply" no template de ação |
-| Migration nova | (opcional) coluna `no_reply_detected BOOLEAN` em `decisions` para auditoria |
+| Migration nova | Coluna `no_reply_detected BOOLEAN NOT NULL DEFAULT FALSE` em `decisions` (auditoria + base para tuning futuro) |
 
 ### 3.4. Critério de aceite
 - [ ] Email de `noreply@github.com` nunca gera `acao = "rascunho"` (verificado por teste e2e)
@@ -102,21 +107,21 @@ Resultado: rascunhos inúteis são gerados, queimando tokens de LLM e poluindo o
 
 ## 4. PR-3 — Redaction de payload sensível em logs do webhook
 
-### 3.1. Problema
+### 4.1. Problema
 [`orchestrator/main.py:267`](orchestrator/main.py#L267) loga `json.dumps(body)[:500]` do webhook recebido. Se o payload contém token de query param, header `Authorization`, ou qualquer credencial, ela vai para o arquivo de log / stdout em texto plano. Risco de **credential leak** se logs forem compartilhados.
 
-### 3.2. Solução
+### 4.2. Solução
 - Criar função `redact_sensitive(payload: dict) -> dict` em `orchestrator/utils/log_redaction.py`
 - Lista de chaves sensíveis (case-insensitive): `token`, `authorization`, `password`, `secret`, `api_key`, `access_token`, `refresh_token`, `cookie`
 - Substituir valor por `"<REDACTED>"` antes de logar
 - Aplicar em **todos** os pontos onde body do webhook ou response externa é logado
 
-### 3.3. Critério de aceite
+### 4.3. Critério de aceite
 - [ ] Função `redact_sensitive` cobre as 8+ chaves listadas
 - [ ] Teste unitário cobre dict aninhado e lista
 - [ ] Nenhum log no `main.py` ou `gmail_service.py` ou `telegram_service.py` registra payload sem redaction
 
-### 3.4. Risco
+### 4.4. Risco
 **Baixo.** Função pura, fácil de testar.
 
 ---
@@ -164,12 +169,15 @@ Cada método é testável isoladamente com mocks. Sem mudança de comportamento 
 Em produção, se o DB ficar indisponível por 5 min, os 3 workers fazem milhares de iterações falhando, queimando CPU e poluindo logs.
 
 ### 6.2. Solução
-1. Função utilitária `run_resilient_worker(name, fn, interval, max_backoff=300)` em `orchestrator/utils/worker.py`
+1. Função utilitária `run_resilient_worker(name, fn, interval, iteration_timeout, max_backoff=300)` em `orchestrator/utils/worker.py`
 2. Backoff exponencial em caso de erro (1s → 2s → 4s → ... → 300s)
-3. Reset do backoff após N iterações bem-sucedidas
+3. Reset do backoff após N iterações bem-sucedidas (N=3)
 4. Cada worker gera novo `request_id` por iteração e injeta no ContextVar
 5. Métricas: `worker_iteration_total{name, status}`, `worker_iteration_duration_seconds`
-6. Timeout de iteração via `asyncio.wait_for(fn(), timeout=interval * 5)`
+6. Timeout de iteração via `asyncio.wait_for(fn(), timeout=iteration_timeout)` — **per-worker explícito**, não derivado do interval. Defaults sugeridos:
+   - `retry_worker`: `iteration_timeout=60s` (processa 1 retry por vez)
+   - `maintenance_worker`: `iteration_timeout=120s` (limpeza de tabelas)
+   - `cleanup_pending_worker`: `iteration_timeout=180s` (varre jobs pendentes, pode ser longo)
 
 ### 6.3. Critério de aceite
 - [ ] Erro forçado em worker faz backoff visível em log
@@ -193,6 +201,22 @@ Em produção, se o DB ficar indisponível por 5 min, os 3 workers fazem milhare
    - `FatalError` (parse, validation, auth) → marca job como `failed`, sem retry
 2. Em pontos críticos (LLM, Gmail, DB), converter exceção genérica para o tipo correto
 3. Job queue checa o tipo e decide entre `mark_failed` e `mark_retry`
+
+### 7.2.1. Mapeamento de exceções (referência para o plano)
+
+| Exceção origem | Classe alvo | Motivo |
+|----------------|-------------|--------|
+| `httpx.TimeoutException`, `httpx.ConnectError`, `httpx.ReadError` | `RetryableError` | Falha de rede transitória |
+| `httpx.HTTPStatusError` com status 5xx ou 429 | `RetryableError` | Servidor / rate limit |
+| `httpx.HTTPStatusError` com status 4xx (exceto 429) | `FatalError` | Cliente errado, retry não resolve |
+| `googleapiclient.errors.HttpError` 5xx ou 429 | `RetryableError` | Gmail API transitório |
+| `googleapiclient.errors.HttpError` 401, 403, 404 | `FatalError` | Auth/permissão/recurso ausente |
+| `asyncio.TimeoutError` | `RetryableError` | Timeout local |
+| `json.JSONDecodeError` | `FatalError` | Resposta malformada — retry não muda |
+| `pydantic.ValidationError` | `FatalError` | Schema do LLM violado — retry já tratado em `validate_and_retry` |
+| `KeyError`, `IndexError`, `AttributeError` | `FatalError` | Bug de programação |
+| `asyncpg.PostgresConnectionError` | `RetryableError` | DB pode voltar |
+| `asyncpg.UniqueViolationError`, `asyncpg.ForeignKeyViolationError` | `FatalError` | Constraint violada |
 
 ### 7.3. Critério de aceite
 - [ ] `JSONDecodeError` em resposta LLM marca job como `failed`, não como `retry`
