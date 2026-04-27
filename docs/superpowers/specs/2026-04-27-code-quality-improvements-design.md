@@ -257,7 +257,7 @@ Para evitar bloat e manter foco:
 - **Refactor de `telegram_commands.py`** (1017 linhas) — escopo separado
 - **Schema central de settings (Pydantic)** — DX, mas não urgente
 - **Métricas detalhadas de learning engine** — depende de definição de SLO primeiro
-- **Detecção de "thread já respondida"** como motivo de não-rascunho — já existe parcialmente em `llm_service.py:590`, sem mudanças neste spec
+- **Detecção de "thread já respondida"** como motivo de não-rascunho — feature existe na branch `fix/thread-awareness` (não no `master`), pode ser combinada com PR-2 em sprint futuro
 
 Esses ficam como TODOs em backlog, fora deste spec.
 
