@@ -136,7 +136,7 @@ async def lifespan(app_instance):
                         raise RuntimeError(result.get("error", "process_email returned error"))
                 await job_queue.mark_completed(job["id"])
             except Exception as e:
-                is_dead = await job_queue.mark_failed(job["id"], str(e))
+                is_dead = await job_queue.handle_failure(job["id"], e)
                 if is_dead:
                     await alerts.alert("job_dead", f"Job #{job['id']} ({job['job_type']}) died: {e}")
 

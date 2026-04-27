@@ -77,6 +77,36 @@ class JobQueue:
                 return True
             return False
 
+    async def mark_failed_permanently(self, job_id: int, error: str) -> None:
+        """Mark job as permanently failed - no retry, status terminal.
+
+        Used for FatalError-class exceptions where retrying won't help.
+        Sets status='dead' directly without incrementing attempts.
+        """
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE failed_jobs
+                   SET status = 'dead',
+                       last_error = $2
+                   WHERE id = $1""",
+                job_id, error,
+            )
+
+    async def handle_failure(self, job_id: int, exc: Exception) -> bool:
+        """Decide entre retry e failed baseado no tipo de excecao.
+
+        Retorna True se job foi marcado como dead (excedeu retries OU e fatal).
+        """
+        # Lazy import para evitar ciclo errors.py <-> job_queue.py
+        from orchestrator.errors import FatalError, classify_exception
+
+        typed = classify_exception(exc)
+        if isinstance(typed, FatalError):
+            await self.mark_failed_permanently(job_id, str(typed))
+            return True
+        # RetryableError -> existing flow that increments retry counter
+        return await self.mark_failed(job_id, str(typed))
+
     async def get_dead_count(self) -> int:
         """Get count of dead jobs (for alerting)."""
         async with self._pool.acquire() as conn:

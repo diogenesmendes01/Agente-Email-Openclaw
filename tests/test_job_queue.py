@@ -64,3 +64,64 @@ class TestJobQueue:
         jq = JobQueue(pool)
         is_dead = await jq.mark_failed(1, "Timeout")
         assert is_dead is False
+
+    @pytest.mark.asyncio
+    async def test_handle_failure_fatal_marks_permanently(self, mock_pool):
+        """FatalError should call mark_failed_permanently, not increment attempts."""
+        from orchestrator.services.job_queue import JobQueue
+        from orchestrator.errors import FatalError
+
+        pool, conn = mock_pool
+        conn.execute.return_value = None
+        jq = JobQueue(pool)
+        is_dead = await jq.handle_failure(job_id=1, exc=FatalError("bad json"))
+        assert is_dead is True
+
+        # Verify a single permanent-failed UPDATE was issued (status='dead' no
+        # attempts increment, no fetchrow check). Existing retry path always
+        # issues an attempts-increment UPDATE first; we should NOT see that.
+        sql_calls = [str(call.args[0]).lower() for call in conn.execute.call_args_list]
+        assert len(sql_calls) == 1
+        sql = sql_calls[0]
+        assert "status = 'dead'" in sql
+        assert "attempts = attempts + 1" not in sql
+        # And fetchrow (used by retry path to check max_attempts) must NOT run
+        conn.fetchrow.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_handle_failure_retryable_uses_existing_path(self, mock_pool):
+        """RetryableError should go through the existing mark_failed (retry counter)."""
+        from orchestrator.services.job_queue import JobQueue
+        from orchestrator.errors import RetryableError
+
+        pool, conn = mock_pool
+        conn.execute.return_value = None
+        # mark_failed checks attempts/max_attempts to decide if dead
+        conn.fetchrow.return_value = {"attempts": 1, "max_attempts": 5}
+        jq = JobQueue(pool)
+
+        is_dead = await jq.handle_failure(job_id=1, exc=RetryableError("timeout"))
+        assert is_dead is False
+
+        # Verify attempts increment was issued (retry path)
+        sql_calls = [str(call.args[0]).lower() for call in conn.execute.call_args_list]
+        retry_calls = [s for s in sql_calls if "attempts = attempts + 1" in s]
+        assert len(retry_calls) == 1
+        # And fetchrow is consulted for max_attempts
+        conn.fetchrow.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_failure_unknown_exception_defaults_fatal(self, mock_pool):
+        """Unknown stdlib exceptions classify as Fatal -> permanent failure."""
+        from orchestrator.services.job_queue import JobQueue
+
+        pool, conn = mock_pool
+        conn.execute.return_value = None
+        jq = JobQueue(pool)
+
+        # KeyError is classified as FatalError by classify_exception
+        is_dead = await jq.handle_failure(job_id=42, exc=KeyError("missing"))
+        assert is_dead is True
+        # Did NOT increment attempts
+        sql_calls = [str(call.args[0]).lower() for call in conn.execute.call_args_list]
+        assert all("attempts = attempts + 1" not in s for s in sql_calls)
