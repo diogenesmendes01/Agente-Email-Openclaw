@@ -466,15 +466,10 @@ class EmailProcessor:
             logger.info(f"Task criada para email {email_id}")
         
         elif acao == "rascunho":
-            draft = await self.gmail.create_draft(
-                to=email.get("from", ""),
-                subject=f"Re: {email.get('subject', '')}",
-                body=action.get("rascunho_resposta", ""),
-                account=account,
-                thread_id=email.get("threadId")
-            )
-            if draft:
-                logger.info(f"Rascunho criado: {draft}")
+            # Rascunho NÃO é mais salvo no Gmail. Texto vai pro Telegram via
+            # notificacao (ja gerada antes em process_email). Usuario envia via
+            # botao "Enviar" se quiser, ou ignora.
+            logger.info(f"[{email_id}] Acao=rascunho — texto enviado ao Telegram, sem draft no Gmail")
         
         # "notificar" não precisa de ação adicional (já vai para Telegram)
 
