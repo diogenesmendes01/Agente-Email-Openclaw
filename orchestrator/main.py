@@ -57,6 +57,7 @@ import asyncpg
 from contextlib import asynccontextmanager
 from orchestrator.settings import get_settings
 from orchestrator.services.database_service import DatabaseService
+from orchestrator.utils.log_redaction import redact_sensitive
 from orchestrator.utils.pdf_reader import PdfReader
 from orchestrator.services.qdrant_service import QdrantService
 from orchestrator.services.llm_service import LLMService
@@ -264,7 +265,7 @@ async def gmail_webhook(
     """
     try:
         body = await request.json()
-        logger.info(f"Webhook recebido: {json.dumps(body)[:500]}")
+        logger.info(f"Webhook recebido: {json.dumps(redact_sensitive(body))[:500]}")
 
         # Validar token (pode vir do body ou query param)
         token = body.get("token")
@@ -372,7 +373,7 @@ async def telegram_callback(request: Request):
         return JSONResponse(status_code=200, content={"status": "bad_request"})
 
     try:
-        logger.info(f"Telegram update: {json.dumps(body)[:500]}")
+        logger.info(f"Telegram update: {json.dumps(redact_sensitive(body))[:500]}")
 
         _settings = get_settings()
         services = {"db": db, "gmail": gmail, "telegram": telegram, "llm": llm,
