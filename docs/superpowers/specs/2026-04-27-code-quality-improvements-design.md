@@ -1,9 +1,10 @@
 # Melhorias de Qualidade do Código — Design Spec
 
 **Data:** 2026-04-27
-**Status:** Aguardando aprovação do usuário
+**Status:** Aprovado pelo usuário — pronto para gerar plano de implementação
 **Escopo:** Remover criação de rascunho no Gmail + detecção de emails não-respondíveis + 4 melhorias prioritárias de qualidade
 **Branch base:** `master`
+**Estratégia de entrega:** **1 PR único** com 6 etapas (uma por commit) — rollback granular via `git revert` se necessário
 
 ---
 
@@ -15,11 +16,11 @@ Após varredura no código atual em `master`, identificamos:
 2. Necessidade de **detectar emails que não pedem/permitem resposta** e suprimir geração de rascunho nesses casos
 3. Quatro alvos de **alto impacto** em segurança, arquitetura e confiabilidade
 
-Cada item será entregue em **PR separado** para reduzir risco e facilitar revisão.
+Tudo entregue em **um único PR**, dividido em 6 commits sequenciais. Cada commit é coeso, testável e pode ser revertido isoladamente se algo quebrar pós-merge.
 
 ---
 
-## 2. PR-1 — Remover criação de rascunho no Gmail
+## 2. Etapa 1 (commit 1) — Remover criação de rascunho no Gmail
 
 ### 2.1. Problema
 Hoje, quando o LLM decide ação `rascunho`, o sistema chama `gmail.create_draft()` e cria um draft **dentro da conta Gmail do usuário** (visível em "Rascunhos" do Gmail). Isso polui a caixa de rascunhos do usuário e duplica o conteúdo que já chega no Telegram.
@@ -49,7 +50,7 @@ Hoje, quando o LLM decide ação `rascunho`, o sistema chama `gmail.create_draft
 
 ---
 
-## 3. PR-2 — Detectar emails não-respondíveis e suprimir rascunho
+## 3. Etapa 2 (commit 2) — Detectar emails não-respondíveis e suprimir rascunho
 
 ### 3.1. Problema
 Hoje o LLM pode escolher `acao = "rascunho"` para qualquer email, incluindo:
@@ -105,7 +106,7 @@ Resultado: rascunhos inúteis são gerados, queimando tokens de LLM e poluindo o
 
 ---
 
-## 4. PR-3 — Redaction de payload sensível em logs do webhook
+## 4. Etapa 3 (commit 3) — Redaction de payload sensível em logs do webhook
 
 ### 4.1. Problema
 [`orchestrator/main.py:267`](orchestrator/main.py#L267) loga `json.dumps(body)[:500]` do webhook recebido. Se o payload contém token de query param, header `Authorization`, ou qualquer credencial, ela vai para o arquivo de log / stdout em texto plano. Risco de **credential leak** se logs forem compartilhados.
@@ -126,7 +127,7 @@ Resultado: rascunhos inúteis são gerados, queimando tokens de LLM e poluindo o
 
 ---
 
-## 5. PR-4 — Refactor de `process_email()` (582 linhas → ~6 métodos)
+## 5. Etapa 4 (commit 4) — Refactor de `process_email()` (582 linhas → ~6 métodos)
 
 ### 5.1. Problema
 [`orchestrator/handlers/email_processor.py:56-638`](orchestrator/handlers/email_processor.py#L56) tem 582 linhas em uma única função. Orquestra 10+ etapas (fetch, parse, contexto, embedding, classificar, resumir, decidir ação, persistência, notificação, learning). Difícil de testar, difícil de debugar, alto risco de regressão.
@@ -156,7 +157,7 @@ Cada método é testável isoladamente com mocks. Sem mudança de comportamento 
 
 ---
 
-## 6. PR-5 — Workers de background resilientes
+## 6. Etapa 5 (commit 5) — Workers de background resilientes
 
 ### 6.1. Problema
 [`orchestrator/main.py:125-170`](orchestrator/main.py#L125) tem 3 workers (`retry_worker`, `maintenance_worker`, `cleanup_pending_worker`) com:
@@ -190,7 +191,7 @@ Em produção, se o DB ficar indisponível por 5 min, os 3 workers fazem milhare
 
 ---
 
-## 7. PR-6 — Discriminar erros retryable vs fatais
+## 7. Etapa 6 (commit 6) — Discriminar erros retryable vs fatais
 
 ### 7.1. Problema
 [`orchestrator/handlers/email_processor.py:446-464`](orchestrator/handlers/email_processor.py#L446) usa `except Exception as e` no final e re-lança para a job queue. Resultado: erro de programação (KeyError, JSON parse) faz o job entrar em retry indefinido, queimando quota de LLM e poluindo a tabela `jobs`.
@@ -228,36 +229,43 @@ Em produção, se o DB ficar indisponível por 5 min, os 3 workers fazem milhare
 
 ---
 
-## 8. Ordem de execução recomendada
+## 8. Ordem dos commits no PR único
+
+Branch: `feat/code-quality-improvements` saindo de `master`.
 
 ```
-PR-1 (rascunho do Gmail)       → 30 min, baixo risco, isolado
+commit 1: Etapa 1 (rascunho do Gmail)       → 30 min, baixo risco, isolado
    ↓
-PR-2 (detecção no-reply)       → comportamento de IA, médio-baixo risco
+commit 2: Etapa 2 (detecção no-reply)       → comportamento de IA, médio-baixo risco
    ↓
-PR-3 (log redaction)           → segurança ALTA, antes de mexer no resto
+commit 3: Etapa 3 (log redaction)           → segurança ALTA
    ↓
-PR-4 (refactor process_email)  → maior, destrava facilidade dos próximos
+commit 4: Etapa 4 (refactor process_email)  → maior, destrava clareza dos próximos
    ↓
-PR-5 (workers resilientes)     → independente do PR-4
+commit 5: Etapa 5 (workers resilientes)     → independente do commit 4
    ↓
-PR-6 (erros tipados)           → depende parcialmente do PR-4 (pontos de catch ficam mais claros)
+commit 6: Etapa 6 (erros tipados)           → fica mais limpo após commit 4
 ```
 
-PR-1 e PR-2 podem ir lado a lado: ambos mexem no fluxo de rascunho mas em pontos diferentes. PR-1 remove o save no Gmail; PR-2 evita gerar rascunho desnecessário em primeiro lugar.
+**Por que essa ordem importa mesmo no mesmo PR:**
+- Cada commit fica coeso e revertível via `git revert <sha>` se algo quebrar em produção
+- Etapas 1+2 (rascunho) ficam isoladas dos refactors
+- Etapa 3 (segurança) entra cedo, não fica refém dos refactors
+- Etapa 4 (refactor maior) acontece antes dos commits 5+6, que se beneficiam da função quebrada em pedaços
+- Cada commit roda sua suite de testes — se um quebrar a build, dá pra identificar qual
 
-Cada PR tem seu próprio branch a partir do `master`, seu próprio plano de implementação, e fecha sozinho.
+**Suite de testes deve passar após CADA commit**, não só no final do PR.
 
 ---
 
 ## 9. Fora de escopo
 
 Para evitar bloat e manter foco:
-- **Caching de embeddings** (item ALTO da varredura) — fica para PR futuro após PR-4 estabilizar
+- **Caching de embeddings** (item ALTO da varredura) — fica para PR futuro após este estabilizar
 - **Refactor de `telegram_commands.py`** (1017 linhas) — escopo separado
 - **Schema central de settings (Pydantic)** — DX, mas não urgente
 - **Métricas detalhadas de learning engine** — depende de definição de SLO primeiro
-- **Detecção de "thread já respondida"** como motivo de não-rascunho — feature existe na branch `fix/thread-awareness` (não no `master`), pode ser combinada com PR-2 em sprint futuro
+- **Detecção de "thread já respondida"** como motivo de não-rascunho — feature existe na branch `fix/thread-awareness` (não no `master`), pode ser combinada com a Etapa 2 em sprint futuro
 
 Esses ficam como TODOs em backlog, fora deste spec.
 
@@ -265,7 +273,8 @@ Esses ficam como TODOs em backlog, fora deste spec.
 
 ## 10. Próximos passos
 
-1. Aprovação do usuário neste spec
-2. Spec review automatizada (subagent)
-3. Geração do plano de implementação detalhado (1 plano por PR, começando pelo PR-1)
-4. Execução incremental com revisão a cada PR
+1. ✅ Spec review automatizada (subagent)
+2. ✅ Aprovação do usuário no spec (1 PR, 6 commits)
+3. Geração do plano de implementação detalhado (checklist de tarefas, etapa por etapa)
+4. Execução das 6 etapas em sequência, com testes passando após cada commit
+5. Push do PR único quando as 6 etapas estiverem prontas e a suite passar
