@@ -118,6 +118,30 @@ def _confirmation_text(action: str, sender: str) -> str:
 
 
 async def handle_callback(callback_query: dict, services: dict):
+    """Public entry point. Wraps _handle_callback_impl in a try/except so that
+    any unhandled error sends the user a visible error message instead of being
+    silently dropped by fire_and_forget.
+    """
+    message = callback_query.get("message", {})
+    chat_id = message.get("chat", {}).get("id")
+    topic_id = message.get("message_thread_id")
+    tg = services["telegram"]
+    try:
+        await _handle_callback_impl(callback_query, services)
+    except Exception as e:
+        logger.error(f"handle_callback error (chat={chat_id}): {e}", exc_info=True)
+        if chat_id:
+            try:
+                await tg.send_text(
+                    chat_id,
+                    "❌ Erro ao processar ação. Tente novamente em instantes.",
+                    thread_id=topic_id,
+                )
+            except Exception:
+                pass  # Telegram também pode estar falhando
+
+
+async def _handle_callback_impl(callback_query: dict, services: dict):
     """Main callback router. Parses callback data and dispatches to actions.
 
     Args:
@@ -350,6 +374,28 @@ async def handle_callback(callback_query: dict, services: dict):
 
 
 async def handle_text_message(message: dict, services: dict):
+    """Public entry point. Wraps _handle_text_message_impl in a try/except so
+    that unhandled errors send the user a visible error message.
+    """
+    chat_id = message.get("chat", {}).get("id")
+    topic_id = message.get("message_thread_id")
+    tg = services["telegram"]
+    try:
+        await _handle_text_message_impl(message, services)
+    except Exception as e:
+        logger.error(f"handle_text_message error (chat={chat_id}): {e}", exc_info=True)
+        if chat_id:
+            try:
+                await tg.send_text(
+                    chat_id,
+                    "❌ Erro ao processar mensagem. Tente novamente em instantes.",
+                    thread_id=topic_id,
+                )
+            except Exception:
+                pass  # Telegram também pode estar falhando
+
+
+async def _handle_text_message_impl(message: dict, services: dict):
     """Handle text messages (for config commands, custom reply instructions, task details).
 
     Args:
