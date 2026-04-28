@@ -56,6 +56,19 @@ Gmail --> Pub/Sub --> Tailscale Funnel (HTTPS) --> Orchestrator (porta 8787)
 - Contexto de thread (emails anteriores da conversa)
 - Extracao automatica de texto de anexos PDF (com fallback via vision model)
 
+### Deteccao de emails nao-respondiveis
+
+Sistema reconhece emails que nao precisam/nao podem receber resposta:
+- **Senders no-reply** (regex em `noreply@`, `mailer-daemon@`, `notifications@`, etc.)
+- **Categorias automatizadas** (`newsletter`, `promocao`, `notificacao_automatica`, `transacional`)
+
+Para esses emails:
+- O LLM **nao gera rascunho de resposta** (economia de tokens)
+- A coluna `decisions.no_reply_detected` registra o flag para auditoria
+- Flag opcional `NO_REPLY_AUTO_ARCHIVE=true` (default `false`) faz com que esses emails sejam arquivados automaticamente sem chamar o LLM de acao
+
+Rascunhos gerados (quando aplicaveis) ficam apenas no Telegram — nao sao mais salvos na pasta "Rascunhos" do Gmail. Use o botao "Enviar" no Telegram para mandar a resposta direto.
+
 ### Prompts em 3 Camadas (Sistema / Tarefa / Usuario)
 Todo prompt enviado ao LLM e construido em 3 camadas compostas, com protecao anti-injection:
 

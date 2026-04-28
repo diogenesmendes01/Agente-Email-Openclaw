@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     action VARCHAR(50),
     summary TEXT,
     reasoning_tokens INT DEFAULT 0,
+    no_reply_detected BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     CONSTRAINT idx_decisions_account_email UNIQUE(account_id, email_id)
 );

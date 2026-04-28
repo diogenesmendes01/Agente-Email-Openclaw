@@ -35,7 +35,7 @@ if log_dir.exists() or os.getenv("EMAIL_AGENT_LOG_FILE"):
     log_dir.mkdir(parents=True, exist_ok=True)
     log_handlers.append(logging.FileHandler(log_dir / "email_agent.log"))
 
-from orchestrator.middleware.request_id import RequestIdFilter, RequestIdMiddleware
+from orchestrator.middleware.request_id import RequestIdFilter, RequestIdMiddleware, request_id_var
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,6 +57,7 @@ import asyncpg
 from contextlib import asynccontextmanager
 from orchestrator.settings import get_settings
 from orchestrator.services.database_service import DatabaseService
+from orchestrator.utils.log_redaction import redact_sensitive
 from orchestrator.utils.pdf_reader import PdfReader
 from orchestrator.services.qdrant_service import QdrantService
 from orchestrator.services.llm_service import LLMService
@@ -70,6 +71,7 @@ from orchestrator.services.job_queue import JobQueue
 from orchestrator.handlers.telegram_callbacks import handle_callback, handle_text_message
 from orchestrator.services.playbook_service import PlaybookService
 from orchestrator.services.model_registry import ModelRegistry
+from orchestrator.utils.worker import run_resilient_worker
 from orchestrator.utils.bg_tasks import fire_and_forget, drain as drain_bg_tasks
 
 # Serviços que não precisam de init async ficam no nível de módulo
@@ -123,52 +125,59 @@ async def lifespan(app_instance):
     # Background workers
     import asyncio
 
-    async def retry_worker():
-        """Retries failed jobs every 60 seconds."""
-        while True:
+    async def _do_retry():
+        """One iteration of retry work — process up to 5 pending jobs."""
+        jobs = await job_queue.get_pending(limit=5)
+        for job in jobs:
             try:
-                jobs = await job_queue.get_pending(limit=5)
-                for job in jobs:
-                    try:
-                        if job["job_type"] == "process_email":
-                            payload = json.loads(job["payload"]) if isinstance(job["payload"], str) else job["payload"]
-                            result = await processor.process_email(payload["email_id"], payload["account"], _is_retry=True)
-                            if result.get("status") == "error":
-                                raise RuntimeError(result.get("error", "process_email returned error"))
-                        await job_queue.mark_completed(job["id"])
-                    except Exception as e:
-                        is_dead = await job_queue.mark_failed(job["id"], str(e))
-                        if is_dead:
-                            await alerts.alert("job_dead", f"Job #{job['id']} ({job['job_type']}) died: {e}")
-            except Exception as e:
-                logger.error(f"Retry worker error: {e}")
-            await asyncio.sleep(60)
+                if job["job_type"] == "process_email":
+                    payload = json.loads(job["payload"]) if isinstance(job["payload"], str) else job["payload"]
+                    # process_email(_is_retry=True) re-lanca a excecao original
+                    # em caso de falha, preservando o tipo para handle_failure
+                    # rotear corretamente via classify_exception.
+                    await processor.process_email(payload["email_id"], payload["account"], _is_retry=True)
+                await job_queue.mark_completed(job["id"])
+            except Exception as e:  # exception aqui e a ORIGINAL tipada
+                is_dead = await job_queue.handle_failure(job["id"], e)
+                if is_dead:
+                    await alerts.alert("job_dead", f"Job #{job['id']} ({job['job_type']}) died: {e}")
 
-    async def maintenance_worker():
-        """Daily maintenance — cleanup old metrics. Runs once at startup, then every 24h."""
-        while True:
-            try:
-                result = await metrics.cleanup(retention_days=_settings.metrics_retention_days)
-                logger.info(f"Metrics cleanup: {result}")
-            except Exception as e:
-                logger.error(f"Metrics cleanup error: {e}")
-            await asyncio.sleep(86400)
+    async def _do_maintenance():
+        """One iteration of daily metrics cleanup."""
+        result = await metrics.cleanup(retention_days=_settings.metrics_retention_days)
+        logger.info(f"Metrics cleanup: {result}")
 
-    retry_task = asyncio.create_task(retry_worker())
-    maint_task = asyncio.create_task(maintenance_worker())
+    async def _do_cleanup_pending():
+        """One iteration of expired pending action cleanup."""
+        count = await db.cleanup_expired_actions()
+        if count > 0:
+            logger.info(f"Cleaned {count} expired pending actions")
 
-    async def cleanup_pending_worker():
-        """Clean up expired pending actions every 60 seconds."""
-        while True:
-            try:
-                count = await db.cleanup_expired_actions()
-                if count > 0:
-                    logger.info(f"Cleaned {count} expired pending actions")
-            except Exception as e:
-                logger.error(f"Pending cleanup error: {e}")
-            await asyncio.sleep(60)
-
-    cleanup_task = asyncio.create_task(cleanup_pending_worker())
+    retry_task = asyncio.create_task(
+        run_resilient_worker(
+            "retry", _do_retry,
+            # iteration_timeout=600s: cada iteracao processa ate 5 jobs em
+            # serie (get_pending(limit=5)), e cada process_email() pode ter
+            # chamadas LLM com timeout=120s. Pior caso: 5 x 120s = 600s.
+            # Valor anterior (60s) era apertado e cancelava lotes saudaveis.
+            interval=60, iteration_timeout=600,
+            request_id_var=request_id_var,
+        )
+    )
+    maint_task = asyncio.create_task(
+        run_resilient_worker(
+            "maintenance", _do_maintenance,
+            interval=86400, iteration_timeout=120,
+            request_id_var=request_id_var,
+        )
+    )
+    cleanup_task = asyncio.create_task(
+        run_resilient_worker(
+            "cleanup_pending", _do_cleanup_pending,
+            interval=60, iteration_timeout=180,
+            request_id_var=request_id_var,
+        )
+    )
 
     logger.info("Email Agent v3.0 started — PostgreSQL connected, workers running")
 
@@ -276,7 +285,7 @@ async def gmail_webhook(
     """
     try:
         body = await request.json()
-        logger.info(f"Webhook recebido: {json.dumps(body)[:500]}")
+        logger.info(f"Webhook recebido: {json.dumps(redact_sensitive(body))[:500]}")
 
         # Validar token (pode vir do body ou query param)
         token = body.get("token")
@@ -384,7 +393,7 @@ async def telegram_callback(request: Request):
         return JSONResponse(status_code=200, content={"status": "bad_request"})
 
     try:
-        logger.info(f"Telegram update: {json.dumps(body)[:500]}")
+        logger.info(f"Telegram update: {json.dumps(redact_sensitive(body))[:500]}")
 
         _settings = get_settings()
         services = {"db": db, "gmail": gmail, "telegram": telegram, "llm": llm,

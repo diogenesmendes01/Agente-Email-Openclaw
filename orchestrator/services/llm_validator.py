@@ -35,7 +35,8 @@ _VALID_PRIORITIES = {"Alta", "Media", "Média", "Baixa"}
 _PRIORITY_NORMALIZE = {"Média": "Media"}
 _VALID_CATEGORIES = {
     "cliente", "financeiro", "pessoal", "trabalho",
-    "promocao", "newsletter", "outro",
+    "promocao", "newsletter", "notificacao_automatica", "transacional",
+    "outro",
 }
 _VALID_ACOES = {"notificar", "arquivar", "criar_task", "rascunho"}
 
@@ -503,3 +504,38 @@ async def validate_and_retry(
         meta.fallback_used = True
 
     return result, meta
+
+
+def demote_rascunho_if_non_replyable(
+    action: Dict[str, Any],
+    from_addr: Optional[str],
+    categoria: Optional[str],
+) -> Dict[str, Any]:
+    """Rebaixa acao='rascunho' para 'notificar' quando email é não-respondível.
+
+    Cenarios:
+    - sender no-reply (regex em from_addr)
+    - categoria nao-respondivel (newsletter, promocao, etc.)
+
+    Quando rebaixa: remove rascunho_resposta e marca flag
+    'rascunho_em_no_reply' em action['flags'] para telemetria.
+    """
+    from orchestrator.utils.reply_policy import (
+        is_no_reply_sender,
+        is_non_replyable_category,
+    )
+
+    if action.get("acao") != "rascunho":
+        return action
+
+    is_no_reply = is_no_reply_sender(from_addr) or is_non_replyable_category(categoria)
+    if not is_no_reply:
+        return action
+
+    new_action = dict(action)
+    new_action["acao"] = "notificar"
+    new_action["rascunho_resposta"] = None
+    flags = dict(new_action.get("flags") or {})
+    flags["rascunho_em_no_reply"] = True
+    new_action["flags"] = flags
+    return new_action

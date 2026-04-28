@@ -203,38 +203,6 @@ class GmailService:
             logger.error(f"Erro ao marcar spam {email_id}: {e}")
             return False
 
-    async def create_draft(
-        self, to: str, subject: str, body: str,
-        account: str, thread_id: Optional[str] = None
-    ) -> Optional[str]:
-        """Cria rascunho de resposta"""
-        service = self._get_service(account)
-        if not service:
-            return None
-
-        try:
-            message = MIMEText(body)
-            message["to"] = to
-            message["subject"] = subject
-
-            raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-            draft_body: Dict[str, Any] = {"message": {"raw": raw}}
-            if thread_id:
-                draft_body["message"]["threadId"] = thread_id
-
-            draft = await asyncio.to_thread(
-                self._locked_execute,
-                service.users().drafts().create(
-                    userId="me", body=draft_body
-                ),
-            )
-            draft_id = draft.get("id", "")
-            logger.info(f"Rascunho criado: {draft_id}")
-            return draft_id
-        except HttpError as e:
-            logger.error(f"Erro ao criar rascunho: {e}")
-            return None
-
     @_retry_external
     async def send_reply(
         self, email_id: str, body: str, account: str,

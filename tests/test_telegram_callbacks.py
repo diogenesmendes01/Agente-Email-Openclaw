@@ -132,3 +132,40 @@ async def test_text_message_triggers_task_creation():
     msg = {"chat": {"id": 100}, "text": "Ligar para o cliente"}
     await handle_text_message(msg, services)
     services["db"].create_task.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_callback_notifies_user_on_error():
+    """If the handler raises, the user gets an error message instead of silence."""
+    from orchestrator.handlers.telegram_callbacks import handle_callback
+    services = _make_services()
+    # Force an error in the inner handler
+    services["db"].get_pending_action = AsyncMock(side_effect=RuntimeError("DB down"))
+
+    # set_urgency calls db.get_pending_action immediately → triggers the mock error
+    callback_query = {
+        "id": "cq1",
+        "data": "set_urgency:high:email_1",
+        "from": {"id": 99},
+        "message": {"chat": {"id": 100}, "message_id": 1, "text": "body"},
+    }
+    # Should NOT raise — error is caught and user is notified
+    await handle_callback(callback_query, services)
+    services["telegram"].send_text.assert_called_once()
+    call_args = services["telegram"].send_text.call_args[0]
+    assert "❌" in call_args[1]
+
+
+@pytest.mark.asyncio
+async def test_handle_text_message_notifies_user_on_error():
+    """If the text handler raises, the user gets an error message instead of silence."""
+    from orchestrator.handlers.telegram_callbacks import handle_text_message
+    services = _make_services()
+    services["db"].get_pending_by_chat = AsyncMock(side_effect=RuntimeError("DB down"))
+
+    msg = {"chat": {"id": 100}, "text": "alguma mensagem", "from": {"id": 99}}
+    # Should NOT raise
+    await handle_text_message(msg, services)
+    services["telegram"].send_text.assert_called_once()
+    call_args = services["telegram"].send_text.call_args[0]
+    assert "❌" in call_args[1]

@@ -74,6 +74,11 @@ class Settings:
         # Learning
         self.learning_interval: int = int(os.getenv("LEARNING_INTERVAL", "50"))
 
+        # Reply policy: se True, sender no-reply forca acao=arquivar sem chamar LLM
+        self.no_reply_auto_archive: bool = (
+            os.getenv("NO_REPLY_AUTO_ARCHIVE", "false").strip().lower() in ("1", "true", "yes")
+        )
+
         # Observability
         self.metrics_retention_days: int = int(os.getenv("METRICS_RETENTION_DAYS", "90"))
         self.alert_throttle_minutes: int = int(os.getenv("ALERT_THROTTLE_MINUTES", "15"))

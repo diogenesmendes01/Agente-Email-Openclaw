@@ -436,3 +436,10 @@ async def test_parallel_emails_do_not_leak_validation(monkeypatch):
     assert meta_a is not meta_b
     # Singleton must NOT carry cross-email state anymore.
     assert not hasattr(llm, "last_validation") or not getattr(llm, "last_validation")
+
+
+def test_validator_accepts_new_non_replyable_categories():
+    from orchestrator.services.llm_validator import ClassificationOut
+    for cat in ["notificacao_automatica", "transacional"]:
+        out = ClassificationOut(categoria=cat)
+        assert out.categoria == cat
