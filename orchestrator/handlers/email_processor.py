@@ -90,6 +90,12 @@ class EmailProcessor:
             if email is None:
                 result["status"] = "error"
                 result["error"] = "Não foi possível buscar o email"
+                if _is_retry:
+                    # Re-raise so the retry worker routes via handle_failure.
+                    # RetryableError (conservador): Gmail pode estar temporariamente
+                    # indisponível. Após max_attempts o job morre normalmente.
+                    from orchestrator.errors import RetryableError
+                    raise RetryableError(f"gmail.get_email returned None for {email_id}")
                 return result
 
             context, ctx_extras = await self._build_context(email, email_id, account, result)

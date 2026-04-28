@@ -44,6 +44,39 @@ async def test_process_email_reraises_typed_exception_on_retry():
 
 
 @pytest.mark.asyncio
+async def test_process_email_reraises_when_fetch_returns_none_on_retry():
+    """Ponto 1 PR #17 review: _fetch_and_parse() pode retornar None (Gmail down
+    ou email deletado) sem levantar exceção. Quando _is_retry=True, process_email
+    deve RE-RAISE (RetryableError) em vez de retornar dict silenciosamente.
+
+    Antes do fix: _do_retry() não via exceção → chamava mark_completed() indevidamente
+    → job sumia da fila sem ter sido processado.
+    """
+    from orchestrator.handlers.email_processor import EmailProcessor
+    from orchestrator.errors import RetryableError
+
+    gmail = MagicMock()
+    # get_email retorna None (sem exception) — simula Gmail indisponível
+    gmail.get_email = AsyncMock(return_value=None)
+
+    processor = EmailProcessor(
+        db=MagicMock(),
+        qdrant=MagicMock(),
+        llm=MagicMock(),
+        gmail=gmail,
+        telegram=MagicMock(),
+    )
+
+    # Webhook path: retorna dict de erro (comportamento inalterado)
+    result = await processor.process_email("abc", "conta_test", _is_retry=False)
+    assert result["status"] == "error"
+
+    # Retry path: DEVE levantar RetryableError para que _do_retry chame handle_failure
+    with pytest.raises(RetryableError):
+        await processor.process_email("abc", "conta_test", _is_retry=True)
+
+
+@pytest.mark.asyncio
 async def test_process_email_does_not_enqueue_retry_when_is_retry_true():
     """When called from the retry worker (_is_retry=True), the failing path must
     NOT enqueue another retry job. The retry worker is already handling the job —
